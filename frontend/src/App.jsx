@@ -14,8 +14,7 @@ import MarketDetailPage from './components/MarketDetailPage.jsx';
 import ProfilePage from './components/ProfilePage.jsx';
 import SettingsPage from './components/SettingsPage.jsx';
 import InfoPage from './components/InfoPage.jsx';
-import BackendPanel from './BackendPanel.jsx';
-import AutomationPanel from './AutomationPanel.jsx';
+import ActivityPage from './components/ActivityPage.jsx';
 
 const env = import.meta.env;
 const statuses = ['Open', 'Resolution requested', 'Settled', 'Refundable'];
@@ -166,6 +165,12 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     positions: Object.values(positions).filter(position => position && BigInt(position.amount) > 0n).length,
   };
   const visiblePositionRows = positionRows.filter(row => !normalizedSearch || row.market.question.toLowerCase().includes(normalizedSearch));
+  const notifications = [
+    ...(lastAction ? [{id: 'confirmed-transaction', icon: 'pulse', title: 'Transaction confirmed', description: `${lastAction.slice(0, 12)}…`, action: 'View activity', page: 'activity'}] : []),
+    ...positionRows.filter(row => row.claimable).map(row => ({id: `claim-${row.market.id}`, icon: 'wallet', title: row.market.status === 2 ? 'Winnings ready to claim' : 'Refund ready to claim', description: row.market.question, action: 'View positions', page: 'positions'})),
+    ...positionRows.filter(row => row.market.status === 0 && now >= Number(row.market.closes_at) && !row.timedOut).map(row => ({id: `request-${row.market.id}`, icon: 'info', title: 'Settlement can be requested', description: row.market.question, action: 'View positions', page: 'positions'})),
+    ...positionRows.filter(row => row.market.status === 1).map(row => ({id: `pending-${row.market.id}`, icon: 'refresh', title: 'Settlement in progress', description: row.market.question, action: 'View positions', page: 'positions'})),
+  ].slice(0, 8);
   const activePage = location.pathname === '/markets/price' ? 'price' : location.pathname === '/markets/event' ? 'event' : location.pathname === '/positions' ? 'positions' : location.pathname === '/activity' ? 'activity' : location.pathname === '/settings' ? 'settings' : location.pathname === '/profile' ? 'profile' : 'markets';
   const pagePaths = {markets: '/markets', price: '/markets/price', event: '/markets/event', positions: '/positions', activity: '/activity', settings: '/settings', profile: '/profile'};
   const navigate = page => routerNavigate(pagePaths[page] || '/markets');
@@ -175,7 +180,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const marketProps = {markets: matchingMarkets, positions, busy, now, previewMode, onPredict: predict, onClaim: claimPosition, onRequest: requestResolution};
 
   return <div className="app-shell">
-    <Header address={address} busy={busy} previewMode={previewMode} search={search} onSearch={setSearch} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value => !value)} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onLogin={onLogin} onLogout={onLogout} authenticated={authenticated} authEnabled={privyEnabled && ready} onActivity={() => navigate('activity')} onCreate={() => setShowCreate(true)} />
+    <Header address={address} busy={busy} previewMode={previewMode} search={search} onSearch={setSearch} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value => !value)} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onLogin={onLogin} onLogout={onLogout} authenticated={authenticated} authEnabled={privyEnabled && ready} onActivity={() => navigate('activity')} onCreate={() => setShowCreate(true)} notifications={notifications} onNavigate={navigate} />
     <div className={`workspace${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`}>
       <Sidebar activePage={activePage} counts={counts} collapsed={sidebarCollapsed} address={address} onNavigate={navigate} />
       <main className="main-content">
@@ -188,7 +193,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/event/:slug" element={<MarketDetailPage markets={markets} positions={positions} busy={busy} now={now} previewMode={previewMode} onPredict={predict} onClaim={claimPosition} onRequest={requestResolution} />} />
           <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR STELLAR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} positions loaded from the contract</p></div></div><PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
           <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} />} />
-          <Route path="/activity" element={<><div className="page-heading"><div><p className="eyebrow">ACCOUNT ACTIVITY</p><h1>Activity and automation</h1></div></div><div className="activity-layout"><BackendPanel address={address} lastAction={lastAction} /><AutomationPanel /></div></>} />
+          <Route path="/activity" element={<ActivityPage address={address} lastAction={lastAction} authenticated={authenticated} authEnabled={privyEnabled && ready} onLogin={onLogin} onConnect={() => runAction(connectWallet)} />} />
           <Route path="/settings" element={<SettingsPage address={address} busy={busy} authenticated={authenticated} authEnabled={privyEnabled && ready} user={user} contractId={env.VITE_CONTRACT_ID} rpcUrl={env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org'} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} />} />
           <Route path="/how-to-use" element={<InfoPage page="how-to-use" />} />
           <Route path="/how-it-works" element={<InfoPage page="how-it-works" />} />
@@ -198,7 +203,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/licenses" element={<InfoPage page="licenses" />} />
           <Route path="*" element={<InfoPage page="not-found" />} />
         </Routes>
-        <footer className="app-footer"><span>RevMarket · Stellar testnet prototype</span><span>Resolution uses the configured operator key</span></footer>
+        <footer className="app-footer"><span>RevMarket · Stellar testnet prototype</span></footer>
       </main>
     </div>
     {showCreate && <CreateMarketModal busy={busy} previewMode={previewMode} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}
