@@ -1,0 +1,20 @@
+{
+  "original_archive_unchanged": true,
+  "historical_source_in_delivery": false,
+  "excluded": [
+    ".git",
+    "node_modules",
+    "dist",
+    "target",
+    "test_snapshots",
+    "backend/data",
+    "*.sqlite*",
+    "private .env files",
+    "secrets.yaml",
+    "*.key",
+    "*.pem"
+  ],
+  "recognizable_credential_pattern_findings": 0,
+  "limitations": "Pattern-based scan, not a guarantee that all secrets are detectable. Original upload and historical source preserved outside delivery.",
+  "files_before_manifest": 80
+}

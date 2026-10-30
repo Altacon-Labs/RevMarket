@@ -1,0 +1,13 @@
+{
+  "date": "2026-10-28",
+  "license": "MIT",
+  "required_community_files": 20,
+  "local_markdown_links_checked": 52,
+  "issue_form_yaml": "static structure, unique IDs and required field declarations checked; hosted parsing pending",
+  "workflow_yaml": "read-only permissions, pinned toolchain and push/PR declarations checked; hosted execution pending",
+  "metadata": "npm/Cargo license and lock metadata coherent",
+  "compiled_wasm": "matches existing passed testnet smoke report",
+  "publication": "not performed",
+  "hosted_ci": "not run here",
+  "drips_status": "not applied or approved; owner must complete onboarding"
+}

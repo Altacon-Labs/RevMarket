@@ -1,0 +1,16 @@
+node_modules/
+dist/
+target/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+service/evidence/
+backend/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
