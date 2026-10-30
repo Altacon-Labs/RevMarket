@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-28T15:27:03.784Z",
+  "network": "Stellar Testnet",
+  "contractId": "CCRZ7JKPNKRLPJO5XWF5WBBDOIU3UXCNP3PDEQ3YHYV4CVDC6WTHZ323",
+  "token": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "wasmSha256": "a3409224c5083b8bb39b570e82a906c97679abc117d7a5f1b345ca838945f6df",
+  "resolver": "GCFAAGT7XCMUCDDO3IWS2XTWLA3WU3BIHUW4YFE6A2Y4KO5HGQYRRSOH",
+  "transactions": [
+    {
+      "method": "deployment",
+      "hash": "a2c035981f75b49c11da43d09c0d5fcdf36e9ab594523790f81c70e7654e6c7f"
+    },
+    {
+      "method": "deployment",
+      "hash": "2f75204be57fa72787f9e17533e01340f1ea56deb4d80df915938223c89ac0d8"
+    },
+    {
+      "method": "create",
+      "hash": "91e5413ee75b71c6b629731182eceac1908cfd62bce31cf11c595c41f286dec5"
+    },
+    {
+      "method": "predict",
+      "hash": "0f5c4400807e37ffc0ed83d48c060fecc2a1f8c3cc2f4c80719a609d3a491346"
+    },
+    {
+      "method": "predict",
+      "hash": "23e4744d9dabeb0824fd997fa42b2490a7af5fcc50d252c04e7d5f930c149e91"
+    },
+    {
+      "method": "request",
+      "hash": "08c09d90dd850d89b792b4385c4efb17eab728dc12f8d9f544af8d44ea73088d"
+    },
+    {
+      "method": "settle_event",
+      "hash": "6a5985c2aad8042ee86d120f4010117eedf17f0ad458dc41a1f24bd1c0a08ed8"
+    },
+    {
+      "method": "claim",
+      "hash": "02a98cf5ec02397c642e31c1df5b90280c9845b8750dda50eb772f88ff52194c"
+    }
+  ],
+  "checks": [
+    "actual WASM upload/deployment",
+    "actual XLM SAC deposits",
+    "duplicate prediction rejected",
+    "early request rejected",
+    "real worker path with deterministic fixture evidence",
+    "settlement confirmed",
+    "loser claim rejected",
+    "winner paid 2 XLM",
+    "duplicate claim rejected",
+    "escrow balance zero"
+  ],
+  "limitations": [
+    "ephemeral identities not saved",
+    "fixture evidence is not real event resolution",
+    "Freighter and live price providers not exercised",
+    "testnet deployment may disappear on reset"
+  ]
+}

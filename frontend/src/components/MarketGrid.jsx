@@ -1,62 +1,20 @@
-import MarketCard from "./MarketCard";
+import {useRef} from 'react';
+import MarketCard from './MarketCard.jsx';
+import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 
-export default function MarketGrid({ markets, positions, onRefresh, onPollSettled, showEmpty, onToast, onNotify, isMobile, isTablet }) {
-  const cols = isMobile ? 1 : isTablet ? 2 : 3;
+function LiveMarketRow({markets, positions, now, previewMode}) {
+  const railRef = useRef(null);
+  const liveMarkets = markets.filter(market => market.status === 0 && now < Number(market.closes_at) && now <= Number(market.deadline));
 
-  if (!markets.length && showEmpty) {
-    return (
-      <div style={{
-        padding: "48px 24px",
-        textAlign: "center",
-        borderRadius: 12,
-        background: "rgba(255,255,255,0.01)",
-        border: "1px dashed rgba(255,255,255,0.07)",
-        display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
-      }}>
-        <div style={{
-          width: 36, height: 36, borderRadius: 10,
-          background: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 16, marginBottom: 2,
-        }}>
-          ◈
-        </div>
-        <p style={{
-          fontFamily: "var(--sans)", fontSize: 13, fontWeight: 500,
-          color: "rgba(255,255,255,0.5)", margin: 0,
-        }}>
-          No markets yet
-        </p>
-        <p style={{
-          fontFamily: "var(--mono)", fontSize: 11,
-          color: "rgba(255,255,255,0.25)", margin: 0,
-        }}>
-          Create the first one to get started
-        </p>
-      </div>
-    );
-  }
+  return <section className="live-market-section" aria-labelledby="live-markets-title">
+    <div className="live-market-heading"><div><p className="eyebrow">OPEN ON STELLAR TESTNET</p><h2 id="live-markets-title">Live markets</h2></div><div className="live-market-controls"><span>{liveMarkets.length} open</span><button className="icon-button" title="Scroll live markets left" aria-label="Scroll live markets left" onClick={() => railRef.current?.scrollBy({left: -288, behavior: 'smooth'})}><PhosphorIcon name="arrowLeft" /></button><button className="icon-button" title="Scroll live markets right" aria-label="Scroll live markets right" onClick={() => railRef.current?.scrollBy({left: 288, behavior: 'smooth'})}><PhosphorIcon name="arrowRight" /></button></div></div>
+    {liveMarkets.length ? <div className="live-market-rail" ref={railRef} aria-label="Horizontally scrolling live markets">{liveMarkets.map(market => <MarketCard key={market.id} market={market} position={positions[market.id]} now={now} previewMode={previewMode} variant="live" />)}</div> : <div className="live-market-empty">No open on-chain markets are available right now.</div>}
+  </section>;
+}
 
-  if (!markets.length) return null;
-
-  return (
-    <div style={{
-      display: "grid",
-      gridTemplateColumns: `repeat(${cols}, 1fr)`,
-      gap: isMobile ? 8 : 12,
-    }}>
-      {markets.map(m => (
-        <MarketCard
-          key={m.id}
-          market={m}
-          userPosition={positions[m.id]}
-          onRefresh={onRefresh}
-          onPollSettled={onPollSettled}
-          onToast={onToast}
-          onNotify={onNotify}
-        />
-      ))}
-    </div>
-  );
+export default function MarketGrid({markets, positions, now, previewMode, showLiveRow = false}) {
+  return <>
+    {showLiveRow && <LiveMarketRow markets={markets} positions={positions} now={now} previewMode={previewMode} />}
+    {markets.length ? <section className="market-grid" aria-label="All prediction markets">{markets.map(market => <MarketCard key={market.id} market={market} position={positions[market.id]} now={now} previewMode={previewMode} />)}</section> : <div className="empty-state market-empty"><strong>No markets found</strong><p>There are no on-chain markets matching this view.</p></div>}
+  </>;
 }

@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-28T15:15:45.564Z",
+  "observations": [
+    {
+      "source": "coinbase",
+      "url": "https://api.coinbase.com/v2/prices/ETH-USD/spot",
+      "price": "233280500000",
+      "observedAt": 1793200545
+    },
+    {
+      "source": "kraken",
+      "url": "https://api.kraken.com/0/public/Ticker?pair=XETHZUSD",
+      "price": "233293000000",
+      "observedAt": 1793200545
+    },
+    {
+      "source": "bitstamp",
+      "url": "https://www.bitstamp.net/api/v2/ticker/ethusd/",
+      "price": "233277000000",
+      "observedAt": 1793200545
+    }
+  ]
+}

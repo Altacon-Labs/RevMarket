@@ -1,0 +1,12 @@
+{
+  "name": "revmarket-backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-sqlite server.mjs"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "17.4.0"
+  }
+}

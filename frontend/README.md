@@ -1,16 +1,15 @@
-# React + Vite
+# RevMarket frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This React/Vite client is the Stellar testnet interface. Dependencies are managed as a workspace from the repository root; use the root `package-lock.json` and do not install or lock dependencies from this directory.
 
-Currently, two official plugins are available:
+From the repository root:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+```sh
+npm ci
+copy frontend/.env.example frontend/.env
+npm run dev
+```
 
-## React Compiler
+Set `VITE_CONTRACT_ID` in `frontend/.env` to the deployed Soroban contract ID. `VITE_PRIVY_APP_ID` enables Privy email OTP and supported web3-wallet sign-in; enable both login methods in the Privy dashboard. Privy account authentication is separate from Freighter, which remains the Stellar transaction signer. `VITE_RPC_URL` defaults to Stellar Testnet. `VITE_IPFS_GATEWAY` is an optional public HTTPS gateway override. Event artwork uploads use the backend `PINATA_JWT`; set it in the backend process environment, never in the frontend `.env`. The backend accepts one JPEG, PNG, or WebP up to 5 MB and stores only the returned CID in the market contract. `VITE_READ_ACCOUNT` is optional and public; it only enables disconnected read simulations. Never place wallet secrets or API tokens in Vite variables.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Use `npm run build` at the repository root to verify the frontend bundle. The local activity backend is optional and is started separately with `npm run backend`.
