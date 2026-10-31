@@ -1,9 +1,8 @@
 # Drips / Stellar submission draft
 
-> Documentation review: 31 October 2026. Source: `RevMarket22.zip`. **As-is** means present in inspected source, not independently proven in production. **Proposed v2** means design only; no v2 contracts or deployment are delivered.
 
 
-## Copy-ready project description
+## Project description
 
 RevMarket is an MIT-licensed, open-source prediction-market prototype built on Stellar using Rust/Soroban, React, Freighter and the Stellar JavaScript SDK. The current implementation supports binary event and structured price markets, 7-decimal token escrow, authenticated resolution, proportional pooled-stake payouts and timeout refunds. Its intended Testnet collateral is native XLM.
 

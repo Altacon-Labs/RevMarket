@@ -7,6 +7,16 @@ const cookieName='revmarket_session';
 const maxImageBytes=5*1024*1024;
 const cidPattern=/^bafy[a-z2-7]{20,}$/;
 const hash=value=>createHash('sha256').update(value).digest('hex');
+const contentHash=obj=>createHash('sha256').update(JSON.stringify(obj,Object.keys(obj).sort())).digest('hex');
+const draftFields=['question','category','tradingClose','observationTime','resolutionDeadline','yesRule','noRule','equalityRule','sources','fallbackRule','unavailableDataRule','collateral','feeBps','resolver','policyVersion','implementationVersion','metadata','origin'];
+const draftRevisionFields=['question','category','metadata_json','trading_close','observation_time','resolution_deadline','yes_rule','no_rule','equality_rule','sources_json','fallback_rule','unavailable_data_rule','collateral','fee_bps','resolver','policy_version','implementation_version'];
+function validateDraftBody(body){
+  if(typeof body.question!=='string'||body.question.length===0||body.question.length>512)throw new ApiError(400,'Question must be 1–512 characters');
+  if(typeof body.tradingClose!=='number'||!Number.isSafeInteger(body.tradingClose)||body.tradingClose<=0)throw new ApiError(400,'Valid trading close timestamp required');
+  if(body.feeBps!==undefined&&(typeof body.feeBps!=='number'||!Number.isSafeInteger(body.feeBps)||body.feeBps<0||body.feeBps>1000))throw new ApiError(400,'Fee basis points must be 0–1000');
+  if(body.sources!==undefined&&!Array.isArray(body.sources))throw new ApiError(400,'Sources must be an array');
+  if(body.metadata!==undefined&&(typeof body.metadata!=='object'||Array.isArray(body.metadata)||body.metadata===null))throw new ApiError(400,'Metadata must be an object');
+}
 class ApiError extends Error {constructor(status,message){super(message);this.status=status;}}
 function object(body,fields){
   if(!body || Array.isArray(body) || typeof body!=='object' || Object.keys(body).some(k=>!fields.includes(k)))throw new ApiError(400,'Unexpected request fields');
@@ -77,7 +87,7 @@ function tokenOf(req){
   const value=(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
   return value && /^[a-f0-9]{64}$/.test(value)?value:null;
 }
-export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.floor(Date.now()/1000),rateLimit=120,superAdminWallets=[],pinataJwt='',uploadImage}){
+export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.floor(Date.now()/1000),rateLimit=120,superAdminWallets=[],pinataJwt='',uploadImage,reviewerWallets=[],aiConfig=null,getAiSuggestionsFn=null}){
   const origin=new URL(appOrigin);
   if(origin.origin!==appOrigin || origin.username || origin.password || !['http:','https:'].includes(origin.protocol))throw new Error('APP_ORIGIN must be an exact HTTP(S) origin');
   if(origin.protocol==='http:' && !['127.0.0.1','localhost','[::1]'].includes(origin.hostname))throw new Error('Non-local APP_ORIGIN requires HTTPS');
@@ -169,6 +179,181 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
         db.prepare('INSERT OR IGNORE INTO activity(wallet,action,tx_hash,created_at) VALUES(?,?,?,?)').run(wallet,body.action,body.txHash,time);
         db.prepare('DELETE FROM activity WHERE wallet=? AND id NOT IN(SELECT id FROM activity WHERE wallet=? ORDER BY id DESC LIMIT 1000)').run(wallet,wallet);
         return send(200,{recorded:true,verification:'unverified_client_report'});
+      }
+      // --- Reviewer role management (super-admin only) ---
+      if(route==='GET /api/admin/reviewers'){
+        const wallet=session(req);
+        if(!superAdmins.has(wallet))throw new ApiError(403,'Super-admin access required');
+        const rows=db.prepare('SELECT wallet,added_by AS addedBy,added_at AS addedAt,revoked_at AS revokedAt FROM reviewers ORDER BY added_at DESC').all();
+        return send(200,{reviewers:rows});
+      }
+      if(route==='POST /api/admin/reviewers'){
+        const wallet=session(req);
+        if(!superAdmins.has(wallet))throw new ApiError(403,'Super-admin access required');
+        const body=await bodyOf(req);object(body,['wallet','action']);
+        if(typeof body.wallet!=='string'||!StrKey.isValidEd25519PublicKey(body.wallet))throw new ApiError(400,'Valid Stellar G-address required');
+        if(!['add','revoke'].includes(body.action))throw new ApiError(400,'Action must be add or revoke');
+        if(body.action==='add'){
+          const existing=db.prepare('SELECT revoked_at FROM reviewers WHERE wallet=?').get(body.wallet);
+          if(existing&&existing.revoked_at===null)throw new ApiError(409,'Reviewer is already active');
+          if(existing)db.prepare('UPDATE reviewers SET added_by=?,added_at=?,revoked_at=NULL WHERE wallet=?').run(wallet,time,body.wallet);
+          else db.prepare('INSERT INTO reviewers VALUES(?,?,?,NULL)').run(body.wallet,wallet,time);
+          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(NULL,?,?,?,?)').run(wallet,'reviewer_added',JSON.stringify({reviewer:body.wallet}),time);
+        }else{
+          const existing=db.prepare('SELECT revoked_at FROM reviewers WHERE wallet=?').get(body.wallet);
+          if(!existing||existing.revoked_at!==null)throw new ApiError(404,'Reviewer not found or already revoked');
+          db.prepare('UPDATE reviewers SET revoked_at=? WHERE wallet=?').run(time,body.wallet);
+          // Invalidate any pending approvals by this reviewer
+          db.prepare("UPDATE drafts SET status='draft',updated_at=? WHERE status='approved' AND id IN (SELECT draft_id FROM review_decisions WHERE reviewer_wallet=? AND decision='approved')").run(time,body.wallet);
+          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(NULL,?,?,?,?)').run(wallet,'reviewer_revoked',JSON.stringify({reviewer:body.wallet}),time);
+        }
+        return send(200,{updated:true});
+      }
+      // --- Draft management ---
+      if(route==='POST /api/drafts'){
+        const wallet=session(req);
+        const body=await bodyOf(req);object(body,draftFields);
+        validateDraftBody(body);
+        const draftOrigin=body.origin==='ai_assisted'?'ai_assisted':'manual';
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          const result=db.prepare('INSERT INTO drafts(owner_wallet,origin,status,created_at,updated_at) VALUES(?,?,?,?,?)').run(wallet,draftOrigin,'draft',time,time);
+          const draftId=Number(result.lastInsertRowid);
+          const revContent={question:body.question,category:body.category||'',tradingClose:body.tradingClose,yesRule:body.yesRule||'',noRule:body.noRule||'',equalityRule:body.equalityRule||'',sources:body.sources||[],fallbackRule:body.fallbackRule||'',collateral:body.collateral||'native',feeBps:body.feeBps||0,resolver:body.resolver||'',implementationVersion:body.implementationVersion||''};
+          const ch=contentHash(revContent);
+          const revResult=db.prepare('INSERT INTO draft_revisions(draft_id,revision_number,question,category,metadata_json,trading_close,observation_time,resolution_deadline,yes_rule,no_rule,equality_rule,sources_json,fallback_rule,unavailable_data_rule,collateral,fee_bps,resolver,policy_version,implementation_version,content_hash,created_at) VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(draftId,body.question,body.category||'',JSON.stringify(body.metadata||{}),body.tradingClose,body.observationTime||null,body.resolutionDeadline||null,body.yesRule||'',body.noRule||'',body.equalityRule||'',JSON.stringify(body.sources||[]),body.fallbackRule||'',body.unavailableDataRule||'',body.collateral||'native',body.feeBps||0,body.resolver||'',body.policyVersion||'',body.implementationVersion||'',ch,time);
+          const revId=Number(revResult.lastInsertRowid);
+          db.prepare('UPDATE drafts SET current_revision_id=? WHERE id=?').run(revId,draftId);
+          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'created',JSON.stringify({revisionId:revId}),time);
+          db.exec('COMMIT');
+          return send(201,{id:draftId,revisionId:revId,contentHash:ch});
+        }catch(e){db.exec('ROLLBACK');throw e;}
+      }
+      if(route==='GET /api/drafts'){
+        const wallet=session(req);
+        const rows=db.prepare('SELECT d.id,d.origin,d.status,d.created_at AS createdAt,d.updated_at AS updatedAt,r.question,r.revision_number AS revisionNumber FROM drafts d LEFT JOIN draft_revisions r ON r.id=d.current_revision_id WHERE d.owner_wallet=? ORDER BY d.id DESC LIMIT 100').all(wallet);
+        return send(200,{drafts:rows});
+      }
+      if(url.pathname.startsWith('/api/drafts/')&&!url.pathname.includes('/api/drafts/0')){
+        const draftIdStr=url.pathname.split('/')[3];
+        const subPath=url.pathname.split('/').slice(4).join('/');
+        const draftId=Number(draftIdStr);
+        if(!Number.isSafeInteger(draftId)||draftId<=0)throw new ApiError(400,'Invalid draft ID');
+        // GET /api/drafts/:id
+        if(req.method==='GET'&&!subPath){
+          const wallet=session(req);
+          const draft=db.prepare('SELECT id,owner_wallet AS ownerWallet,origin,status,created_at AS createdAt,updated_at AS updatedAt FROM drafts WHERE id=?').get(draftId);
+          if(!draft)throw new ApiError(404,'Draft not found');
+          // Owners and active reviewers can view drafts
+          const reviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
+          if(draft.ownerWallet!==wallet&&!reviewer&&!superAdmins.has(wallet))throw new ApiError(403,'Access denied');
+          const revisions=db.prepare('SELECT id,revision_number AS revisionNumber,question,category,metadata_json AS metadataJson,trading_close AS tradingClose,observation_time AS observationTime,resolution_deadline AS resolutionDeadline,yes_rule AS yesRule,no_rule AS noRule,equality_rule AS equalityRule,sources_json AS sourcesJson,fallback_rule AS fallbackRule,unavailable_data_rule AS unavailableDataRule,collateral,fee_bps AS feeBps,resolver,policy_version AS policyVersion,implementation_version AS implementationVersion,content_hash AS contentHash,created_at AS createdAt FROM draft_revisions WHERE draft_id=? ORDER BY revision_number DESC').all(draftId);
+          const reviews=db.prepare('SELECT id,revision_id AS revisionId,reviewer_wallet AS reviewerWallet,decision,reason,approved_params_hash AS approvedParamsHash,expiry,created_at AS createdAt FROM review_decisions WHERE draft_id=? ORDER BY id DESC').all(draftId);
+          return send(200,{draft,revisions,reviews});
+        }
+        // PUT /api/drafts/:id — update (creates new revision, invalidates approval)
+        if(req.method==='PUT'&&!subPath){
+          const wallet=session(req);
+          const body=await bodyOf(req);object(body,draftFields);
+          validateDraftBody(body);
+          const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+          if(!draft)throw new ApiError(404,'Draft not found');
+          if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can edit a draft');
+          if(!['draft','changes_requested','approved'].includes(draft.status))throw new ApiError(409,`Cannot edit a draft in status: ${draft.status}`);
+          db.exec('BEGIN IMMEDIATE');
+          try{
+            const maxRev=db.prepare('SELECT MAX(revision_number) AS n FROM draft_revisions WHERE draft_id=?').get(draftId).n||0;
+            const revContent={question:body.question,category:body.category||'',tradingClose:body.tradingClose,yesRule:body.yesRule||'',noRule:body.noRule||'',equalityRule:body.equalityRule||'',sources:body.sources||[],fallbackRule:body.fallbackRule||'',collateral:body.collateral||'native',feeBps:body.feeBps||0,resolver:body.resolver||'',implementationVersion:body.implementationVersion||''};
+            const ch=contentHash(revContent);
+            const revResult=db.prepare('INSERT INTO draft_revisions(draft_id,revision_number,question,category,metadata_json,trading_close,observation_time,resolution_deadline,yes_rule,no_rule,equality_rule,sources_json,fallback_rule,unavailable_data_rule,collateral,fee_bps,resolver,policy_version,implementation_version,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(draftId,maxRev+1,body.question,body.category||'',JSON.stringify(body.metadata||{}),body.tradingClose,body.observationTime||null,body.resolutionDeadline||null,body.yesRule||'',body.noRule||'',body.equalityRule||'',JSON.stringify(body.sources||[]),body.fallbackRule||'',body.unavailableDataRule||'',body.collateral||'native',body.feeBps||0,body.resolver||'',body.policyVersion||'',body.implementationVersion||'',ch,time);
+            const revId=Number(revResult.lastInsertRowid);
+            // Editing an approved draft resets to draft and invalidates approval
+            const newStatus=draft.status==='approved'?'draft':draft.status==='changes_requested'?'draft':draft.status;
+            db.prepare('UPDATE drafts SET current_revision_id=?,status=?,updated_at=? WHERE id=?').run(revId,newStatus,time,draftId);
+            db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'revised',JSON.stringify({revisionId:revId,revisionNumber:maxRev+1,previousStatus:draft.status}),time);
+            db.exec('COMMIT');
+            return send(200,{revisionId:revId,revisionNumber:maxRev+1,contentHash:ch,status:newStatus});
+          }catch(e){db.exec('ROLLBACK');throw e;}
+        }
+        // POST /api/drafts/:id/submit
+        if(req.method==='POST'&&subPath==='submit'){
+          const wallet=session(req);
+          const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+          if(!draft)throw new ApiError(404,'Draft not found');
+          if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can submit a draft');
+          if(!['draft','changes_requested'].includes(draft.status))throw new ApiError(409,`Cannot submit a draft in status: ${draft.status}`);
+          db.prepare("UPDATE drafts SET status='submitted',updated_at=? WHERE id=?").run(time,draftId);
+          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'submitted','{}',time);
+          return send(200,{status:'submitted'});
+        }
+        // POST /api/drafts/:id/withdraw
+        if(req.method==='POST'&&subPath==='withdraw'){
+          const wallet=session(req);
+          const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+          if(!draft)throw new ApiError(404,'Draft not found');
+          if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can withdraw a draft');
+          if(!['submitted','approved'].includes(draft.status))throw new ApiError(409,`Cannot withdraw a draft in status: ${draft.status}`);
+          db.prepare("UPDATE drafts SET status='draft',updated_at=? WHERE id=?").run(time,draftId);
+          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'withdrawn',JSON.stringify({previousStatus:draft.status}),time);
+          return send(200,{status:'draft'});
+        }
+        // POST /api/drafts/:id/review — reviewer decision
+        if(req.method==='POST'&&subPath==='review'){
+          const wallet=session(req);
+          const reviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
+          if(!reviewer)throw new ApiError(403,'Active reviewer role required');
+          const body=await bodyOf(req);object(body,['decision','reason','expiry']);
+          if(!['changes_requested','rejected','approved'].includes(body.decision))throw new ApiError(400,'Decision must be changes_requested, rejected, or approved');
+          const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+          if(!draft)throw new ApiError(404,'Draft not found');
+          if(draft.status!=='submitted')throw new ApiError(409,'Only submitted drafts can be reviewed');
+          if(draft.owner_wallet===wallet)throw new ApiError(403,'Reviewers cannot review their own drafts');
+          const revision=db.prepare('SELECT * FROM draft_revisions WHERE id=?').get(draft.current_revision_id);
+          db.exec('BEGIN IMMEDIATE');
+          try{
+            let approvedHash=null,expiry=null;
+            if(body.decision==='approved'){
+              approvedHash=revision.content_hash;
+              expiry=body.expiry||(time+86400); // Default 24h expiry
+              if(expiry<=time)throw new ApiError(400,'Expiry must be in the future');
+            }
+            db.prepare('INSERT INTO review_decisions(draft_id,revision_id,reviewer_wallet,decision,reason,approved_params_hash,expiry,created_at) VALUES(?,?,?,?,?,?,?,?)').run(draftId,draft.current_revision_id,wallet,body.decision,body.reason||'',approvedHash,expiry,time);
+            const statusMap={changes_requested:'changes_requested',rejected:'rejected',approved:'approved'};
+            db.prepare('UPDATE drafts SET status=?,updated_at=? WHERE id=?').run(statusMap[body.decision],time,draftId);
+            db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'reviewed',JSON.stringify({decision:body.decision,revisionId:draft.current_revision_id,approvedHash,expiry}),time);
+            db.exec('COMMIT');
+            return send(200,{status:statusMap[body.decision],approvedParamsHash:approvedHash,expiry});
+          }catch(e){db.exec('ROLLBACK');throw e;}
+        }
+        // POST /api/drafts/:id/ai-assist — AI drafting suggestions
+        if(req.method==='POST'&&subPath==='ai-assist'){
+          const wallet=session(req);
+          const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+          if(!draft)throw new ApiError(404,'Draft not found');
+          if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can request AI assistance');
+          if(!['draft','changes_requested'].includes(draft.status))throw new ApiError(409,'AI assistance is only available for editable drafts');
+          if(!getAiSuggestionsFn&&!aiConfig)throw new ApiError(503,'AI assistance is not configured');
+          const revision=db.prepare('SELECT * FROM draft_revisions WHERE id=?').get(draft.current_revision_id);
+          if(!revision)throw new ApiError(404,'No revision found');
+          const draftInput={question:revision.question,category:revision.category,yesRule:revision.yes_rule,noRule:revision.no_rule,sources:JSON.parse(revision.sources_json||'[]')};
+          let suggestions;
+          try{
+            if(getAiSuggestionsFn){suggestions=await getAiSuggestionsFn(draftInput);}
+            else{const{getAiSuggestions}=await import('./ai.mjs');suggestions=await getAiSuggestions({...aiConfig,draft:draftInput});}
+          }catch(e){throw new ApiError(502,`AI assistance failed: ${e.message}`);}
+          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'ai_assisted',JSON.stringify({model:suggestions.model||'unknown',inputHash:suggestions.inputHash||''}),time);
+          // Mark draft origin as ai_assisted if it was manual
+          if(draft.origin==='manual')db.prepare("UPDATE drafts SET origin='ai_assisted',updated_at=? WHERE id=?").run(time,draftId);
+          return send(200,{suggestions});
+        }
+      }
+      // GET /api/review-queue — list submitted drafts (reviewer or super-admin only)
+      if(route==='GET /api/review-queue'){
+        const wallet=session(req);
+        const reviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
+        if(!reviewer&&!superAdmins.has(wallet))throw new ApiError(403,'Active reviewer or super-admin role required');
+        const rows=db.prepare("SELECT d.id,d.owner_wallet AS ownerWallet,d.origin,d.status,d.created_at AS createdAt,d.updated_at AS updatedAt,r.question,r.revision_number AS revisionNumber,r.content_hash AS contentHash FROM drafts d LEFT JOIN draft_revisions r ON r.id=d.current_revision_id WHERE d.status='submitted' ORDER BY d.updated_at ASC LIMIT 100").all();
+        return send(200,{queue:rows});
       }
       if(route==='DELETE /api/me'){
         const wallet=session(req);

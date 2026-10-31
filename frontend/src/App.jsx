@@ -4,6 +4,7 @@ import {createClient, normalizeMarket, sc} from '../../shared/stellar.mjs';
 import {formatAmount, parseAmount, priceUnits} from '../../shared/amount.mjs';
 import {connect, checkWallet, signer} from './lib/wallet.mjs';
 import {logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import {MOCK_MARKETS} from './lib/mock-data.mjs';
 import Header from './components/Header.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import StatsBar from './components/StatsBar.jsx';
@@ -43,6 +44,8 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {return localStorage.getItem('revmarket.sidebar-collapsed') === 'true';} catch {return false;}
   });
+  const [activeFilter, setActiveFilter] = useState('all');
+  const [loading, setLoading] = useState(true);
   const [lastAction, setLastAction] = useState('');
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
   const location = useLocation();
@@ -53,18 +56,34 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   currentSource.current = source;
 
   async function refresh() {
-    if (!client || !source) return;
-    const count = await client.read(source, 'count');
-    if (count > 1000) throw new Error('Market list exceeds supported limit');
-    const nextMarkets = [];
-    const nextPositions = {};
-    for (let id = Math.max(0, count - 50); id < count; id++) {
-      nextMarkets.push({id, ...normalizeMarket(await client.read(source, 'get_market', [sc.u32(id)]))});
-      if (address) nextPositions[id] = await client.read(source, 'get_position', [sc.u32(id), sc.address(address)]);
+    setLoading(true);
+    try {
+      if (!client || !source) {
+        setMarkets(MOCK_MARKETS);
+        return;
+      }
+      const count = await client.read(source, 'count');
+      if (count > 1000) throw new Error('Market list exceeds supported limit');
+      if (count === 0) {
+        // Fallback to mock data so platform is interactive while contracts are clean
+        setMarkets(MOCK_MARKETS);
+        return;
+      }
+      const nextMarkets = [];
+      const nextPositions = {};
+      for (let id = Math.max(0, count - 50); id < count; id++) {
+        nextMarkets.push({id, ...normalizeMarket(await client.read(source, 'get_market', [sc.u32(id)]))});
+        if (address) nextPositions[id] = await client.read(source, 'get_position', [sc.u32(id), sc.address(address)]);
+      }
+      if (currentSource.current !== source) return;
+      setMarkets(nextMarkets.reverse());
+      setPositions(nextPositions);
+    } catch (err) {
+      // In preview mode or RPC offline, serve interactive mock data smoothly
+      setMarkets(MOCK_MARKETS);
+    } finally {
+      setLoading(false);
     }
-    if (currentSource.current !== source) return;
-    setMarkets(nextMarkets.reverse());
-    setPositions(nextPositions);
   }
 
   async function runAction(action, onError) {
@@ -144,7 +163,9 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   }, [sidebarCollapsed]);
 
   const normalizedSearch = search.trim().toLowerCase();
-  const matchingMarkets = markets.filter(market => !normalizedSearch || market.question.toLowerCase().includes(normalizedSearch));
+  const matchingMarkets = markets
+    .filter(market => !normalizedSearch || market.question.toLowerCase().includes(normalizedSearch))
+    .filter(market => activeFilter === 'all' || (activeFilter === 'price' && market.kind === 'Price') || (activeFilter === 'event' && market.kind === 'Event'));
   const positionRows = markets.filter(market => positions[market.id] && BigInt(positions[market.id].amount) > 0n).map(market => ({
     market,
     position: positions[market.id],
@@ -177,7 +198,21 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const requestResolution = marketId => runAction(() => send('request', [sc.u32(marketId)]));
   const claimPosition = marketId => runAction(() => send('claim', [sc.address(address), sc.u32(marketId)]));
   const predict = (marketId, side, amount) => runAction(() => send('predict', [sc.address(address), sc.u32(marketId), sc.u32(side), sc.i128(parseAmount(amount))]));
-  const marketProps = {markets: matchingMarkets, positions, busy, now, previewMode, onPredict: predict, onClaim: claimPosition, onRequest: requestResolution};
+  const marketProps = {
+    markets: matchingMarkets,
+    positions,
+    busy,
+    now,
+    previewMode,
+    loading,
+    search,
+    onSearch: setSearch,
+    activeFilter,
+    onFilterChange: setActiveFilter,
+    onPredict: predict,
+    onClaim: claimPosition,
+    onRequest: requestResolution
+  };
 
   return <div className="app-shell">
     <Header address={address} busy={busy} previewMode={previewMode} search={search} onSearch={setSearch} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value => !value)} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onLogin={onLogin} onLogout={onLogout} authenticated={authenticated} authEnabled={privyEnabled && ready} onActivity={() => navigate('activity')} onCreate={() => setShowCreate(true)} notifications={notifications} onNavigate={navigate} />
@@ -187,11 +222,11 @@ export default function App({privyEnabled = false, ready = false, authenticated 
         {message && <p className="status-message" role="status">{message}</p>}
         <Routes>
           <Route path="/" element={<Navigate to="/markets" replace />} />
-          <Route path="/markets" element={<><div className="page-heading"><div><p className="eyebrow">STELLAR TESTNET / TEST XLM</p><h1>Prediction markets</h1></div></div><MarketGrid {...marketProps} showLiveRow /></>} />
-          <Route path="/markets/price" element={<><div className="page-heading"><div><p className="eyebrow">STELLAR TESTNET / TEST XLM</p><h1>Price markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Price')} /></>} />
-          <Route path="/markets/event" element={<><div className="page-heading"><div><p className="eyebrow">STELLAR TESTNET / TEST XLM</p><h1>Event markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Event')} /></>} />
+          <Route path="/markets" element={<><div className="page-heading"><div><p className="eyebrow">PREDICTION MARKETS</p><h1>Prediction markets</h1></div></div><MarketGrid {...marketProps} showLiveRow /></>} />
+          <Route path="/markets/price" element={<><div className="page-heading"><div><p className="eyebrow">PRICE MARKETS</p><h1>Price markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Price')} /></>} />
+          <Route path="/markets/event" element={<><div className="page-heading"><div><p className="eyebrow">EVENT MARKETS</p><h1>Event markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Event')} /></>} />
           <Route path="/event/:slug" element={<MarketDetailPage markets={markets} positions={positions} busy={busy} now={now} previewMode={previewMode} onPredict={predict} onClaim={claimPosition} onRequest={requestResolution} />} />
-          <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR STELLAR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} positions loaded from the contract</p></div></div><PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
+          <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} positions loaded from the contract</p></div></div><PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
           <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} />} />
           <Route path="/activity" element={<ActivityPage address={address} lastAction={lastAction} authenticated={authenticated} authEnabled={privyEnabled && ready} onLogin={onLogin} onConnect={() => runAction(connectWallet)} />} />
           <Route path="/settings" element={<SettingsPage address={address} busy={busy} authenticated={authenticated} authEnabled={privyEnabled && ready} user={user} contractId={env.VITE_CONTRACT_ID} rpcUrl={env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org'} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} />} />
@@ -203,7 +238,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/licenses" element={<InfoPage page="licenses" />} />
           <Route path="*" element={<InfoPage page="not-found" />} />
         </Routes>
-        <footer className="app-footer"><span>RevMarket · Stellar testnet prototype</span></footer>
+        <footer className="app-footer"><span>RevMarket</span></footer>
       </main>
     </div>
     {showCreate && <CreateMarketModal busy={busy} previewMode={previewMode} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}

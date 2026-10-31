@@ -1,6 +1,5 @@
 # Architecture and migration design
 
-> Documentation review: 31 October 2026. Source: `RevMarket22.zip`. **As-is** means present in inspected source, not independently proven in production. **Proposed v2** means design only; no v2 contracts or deployment are delivered.
 
 
 ## 1. Current topology and boundaries

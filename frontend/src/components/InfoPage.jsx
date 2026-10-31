@@ -1,4 +1,5 @@
 import {Link} from 'react-router-dom';
+import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 
 const pages = {
   'how-to-use': {
@@ -30,5 +31,5 @@ const pages = {
 export default function InfoPage({page}) {
   const content = pages[page];
   if (!content) return <section className="page-state"><p className="eyebrow">NOT FOUND</p><h1>Page not found</h1><Link className="button button-secondary" to="/markets">Back to markets</Link></section>;
-  return <article className="info-page"><p className="eyebrow">{content.eyebrow}</p><h1>{content.title}</h1><p className="info-intro">{content.intro}</p><div className="info-sections">{content.sections.map(([title, body]) => <section key={title}><h2>{title}</h2><p>{body}</p></section>)}</div><Link className="back-link" to="/markets">← Back to markets</Link></article>;
+  return <article className="info-page"><p className="eyebrow">{content.eyebrow}</p><h1>{content.title}</h1><p className="info-intro">{content.intro}</p><div className="info-sections">{content.sections.map(([title, body]) => <section key={title}><h2>{title}</h2><p>{body}</p></section>)}</div><Link className="back-link" to="/markets"><PhosphorIcon name="arrowLeft" size={14} /> Back to markets</Link></article>;
 }

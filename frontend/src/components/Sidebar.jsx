@@ -20,7 +20,7 @@ export default function Sidebar({activePage, counts, collapsed, address, onNavig
       </section>)}
     </nav>
     <div className="sidebar-footer">
-      <div className="sidebar-network" title="Stellar Testnet"><span className="network-indicator" /><span className="sidebar-network-label">Stellar Testnet</span></div>
+      <div className="sidebar-network" title="Network"><span className="network-indicator" /><span className="sidebar-network-label">RevMarket</span></div>
       <button className={`sidebar-profile${activePage === 'profile' ? ' is-active' : ''}`} title={collapsed ? `Profile · ${accountLabel}` : undefined} aria-label={`Profile, ${accountLabel}`} aria-current={activePage === 'profile' ? 'page' : undefined} onClick={() => onNavigate('profile')}>
         <span className="sidebar-profile-avatar"><PhosphorIcon name="user" size={18} /></span>
         <span className="sidebar-profile-copy"><strong>Profile</strong><small>{accountLabel}</small></span>

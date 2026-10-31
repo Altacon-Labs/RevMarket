@@ -82,3 +82,11 @@ export async function reportActivity(wallet, action, txHash) {
     throw error;
   }
 }
+
+export async function requestAiAssist(draftId) {
+  return await api(`/drafts/${draftId}/ai-assist`, {method: 'POST', body: {}});
+}
+
+export async function createDraft(draftData) {
+  return await api('/drafts', {method: 'POST', body: draftData});
+}
