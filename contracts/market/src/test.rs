@@ -14,6 +14,25 @@ impl Fixture {
         let id = e.register(RevMarket, (token.clone(), resolver.clone()));
         let a = Address::generate(&e);
         let b = Address::generate(&e);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        
         let asset = token::StellarAssetClient::new(&e, &token);
         asset.mint(&a, &1000);
         asset.mint(&b, &1000);
