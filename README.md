@@ -115,7 +115,55 @@ Project-specific expectations:
 - **Deployed Testnet Contract ID**: `CACP6QFWWZ7BBMDXB5KHC6AAQKE3HBQ4MFFZNNAIJWYK7P6GXJAMLHIN`
 - **Network**: Stellar Testnet (`https://soroban-testnet.stellar.org`)
 
-Use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for setup and environment variables. Use [docs/VERIFICATION.md](docs/VERIFICATION.md) for the intended verification steps and public evidence expectations.
+### Step-by-step Contract Deployment
+
+1. **Build the WASM binary**:
+   ```bash
+   rustup target add wasm32v1-none
+   stellar contract build --manifest-path contracts/Cargo.toml
+   ```
+
+2. **Generate and fund a Testnet deployer account**:
+   ```bash
+   stellar keys generate deployer --network testnet
+   stellar keys fund deployer --network testnet
+   ```
+
+3. **Deploy with constructor parameters**:
+   ```bash
+   stellar contract deploy \
+     --wasm contracts/target/wasm32v1-none/release/revmarket.wasm \
+     --source deployer \
+     --network testnet \
+     -- \
+     --token CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+     --resolver deployer
+   ```
+
+4. **Create a prediction market via CLI**:
+   ```bash
+   stellar contract invoke \
+     --id CACP6QFWWZ7BBMDXB5KHC6AAQKE3HBQ4MFFZNNAIJWYK7P6GXJAMLHIN \
+     --source deployer \
+     --network testnet \
+     -- create \
+     --creator deployer \
+     --question "[Crypto] Will Stellar XLM spot price be strictly above $0.35 USD at settlement?" \
+     --description_cid "bafkreifdummycid" \
+     --image_cid "bafkreifdummycid" \
+     --kind '{"Price":["XLM","3500000"]}' \
+     --closes_at $(($(date +%s) + 604800))
+   ```
+
+5. **Frontend Setup**:
+   In `frontend/.env` (and Vercel environment variables):
+   ```env
+   VITE_CONTRACT_ID=CACP6QFWWZ7BBMDXB5KHC6AAQKE3HBQ4MFFZNNAIJWYK7P6GXJAMLHIN
+   VITE_RPC_URL=https://soroban-testnet.stellar.org
+   VITE_READ_ACCOUNT=<YOUR_DEPLOYER_PUBLIC_G_KEY>
+   ```
+
+Use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full configuration and [docs/VERIFICATION.md](docs/VERIFICATION.md) for verification evidence expectations.
 
 Do not use production funds. Keep all secrets in local environment files or secret managers and never commit them.
 
