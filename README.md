@@ -112,6 +112,9 @@ Project-specific expectations:
 
 ## Deployment and verification
 
+- **Deployed Testnet Contract ID**: `CACP6QFWWZ7BBMDXB5KHC6AAQKE3HBQ4MFFZNNAIJWYK7P6GXJAMLHIN`
+- **Network**: Stellar Testnet (`https://soroban-testnet.stellar.org`)
+
 Use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for setup and environment variables. Use [docs/VERIFICATION.md](docs/VERIFICATION.md) for the intended verification steps and public evidence expectations.
 
 Do not use production funds. Keep all secrets in local environment files or secret managers and never commit them.
