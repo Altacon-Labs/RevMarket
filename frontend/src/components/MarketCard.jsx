@@ -85,13 +85,16 @@ export default function MarketCard({market, position, now, previewMode, variant 
       )}
 
       {!isLive && (
-        <div className="market-card-trade-options" aria-label="Choose an outcome" onClick={(e) => e.stopPropagation()}>
+        <div className="market-card-trade-options" aria-label="Choose an outcome">
           <button
             type="button"
             className={`outcome-choice outcome-choice-yes${side === 0 ? ' is-selected' : ''}`}
             aria-pressed={side === 0}
             disabled={!selectable && side !== 0}
-            onClick={() => setSide(0)}
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate(marketPath(market, 0));
+            }}
           >
             YES
           </button>
@@ -100,7 +103,10 @@ export default function MarketCard({market, position, now, previewMode, variant 
             className={`outcome-choice outcome-choice-no${side === 1 ? ' is-selected' : ''}`}
             aria-pressed={side === 1}
             disabled={!selectable && side !== 1}
-            onClick={() => setSide(1)}
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate(marketPath(market, 1));
+            }}
           >
             NO
           </button>

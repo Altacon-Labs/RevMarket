@@ -55,8 +55,10 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const currentSource = useRef(source);
   currentSource.current = source;
 
-  async function refresh() {
-    setLoading(true);
+  async function refresh(isInitial = false) {
+    if (isInitial) {
+      setLoading(true);
+    }
     try {
       if (!client || !source) {
         setMarkets(MOCK_MARKETS);
@@ -82,7 +84,9 @@ export default function App({privyEnabled = false, ready = false, authenticated 
       // In preview mode or RPC offline, serve interactive mock data smoothly
       setMarkets(MOCK_MARKETS);
     } finally {
-      setLoading(false);
+      if (isInitial) {
+        setLoading(false);
+      }
     }
   }
 
@@ -175,9 +179,10 @@ export default function App({privyEnabled = false, ready = false, authenticated 
 
   useEffect(() => {
     let stopped = false;
-    const load = () => refresh().catch(error => {if (!stopped) setMessage(error.message);});
-    load();
-    const timer = setInterval(load, 15000);
+    const load = (initial) => refresh(initial).catch(error => {if (!stopped) setMessage(error.message);});
+    load(true);
+    // Silent background poll every 30 seconds without interrupting UI
+    const timer = setInterval(() => load(false), 30000);
     return () => {stopped = true; clearInterval(timer);};
   }, [source]);
 
@@ -253,7 +258,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/markets" element={<><div className="page-heading"><div><p className="eyebrow">PREDICTION MARKETS</p><h1>Prediction markets</h1></div></div><MarketGrid {...marketProps} showLiveRow /></>} />
           <Route path="/markets/price" element={<><div className="page-heading"><div><p className="eyebrow">PRICE MARKETS</p><h1>Price markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Price')} /></>} />
           <Route path="/markets/event" element={<><div className="page-heading"><div><p className="eyebrow">EVENT MARKETS</p><h1>Event markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Event')} /></>} />
-          <Route path="/event/:slug" element={<MarketDetailPage markets={markets} positions={positions} busy={busy} now={now} previewMode={previewMode} onPredict={predict} onClaim={claimPosition} onRequest={requestResolution} />} />
+          <Route path="/event/:slug" element={<MarketDetailPage markets={markets} positions={positions} address={address} onConnect={() => runAction(connectWallet)} busy={busy} now={now} previewMode={previewMode} onPredict={predict} onClaim={claimPosition} onRequest={requestResolution} />} />
           <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} positions loaded from the contract</p></div></div><PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
           <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} />} />
           <Route path="/activity" element={<ActivityPage address={address} lastAction={lastAction} authenticated={authenticated} authEnabled={privyEnabled && ready} onLogin={onLogin} onConnect={() => runAction(connectWallet)} />} />

@@ -13,7 +13,7 @@ const chartRanges = {
   month: {label: '30D', seconds: 2_592_000, granularity: 21_600},
 };
 
-export default function MarketDetailPage({markets, positions, busy, now, previewMode, onPredict, onClaim, onRequest}) {
+export default function MarketDetailPage({markets, positions, address, onConnect, busy, now, previewMode, onPredict, onClaim, onRequest}) {
   const {slug} = useParams();
   const location = useLocation();
   const [side, setSide] = useState(() => {
@@ -21,6 +21,7 @@ export default function MarketDetailPage({markets, positions, busy, now, preview
     return value === '0' || value === '1' ? Number(value) : 0;
   });
   const [amount, setAmount] = useState('1');
+  const [submitError, setSubmitError] = useState('');
   const [range, setRange] = useState('week');
   const [priceSeries, setPriceSeries] = useState(null);
   const [chartLoading, setChartLoading] = useState(false);
@@ -86,7 +87,37 @@ export default function MarketDetailPage({markets, positions, busy, now, preview
       <aside className="detail-trade-column">
         <section className="trade-panel"><div className="detail-section-heading"><div><p className="eyebrow">CURRENT POOLS</p><h2>Market liquidity</h2></div></div><div className="trade-outcome yes-outcome"><span>YES</span><strong>{formatAmount(market.yes_pool)} XLM</strong></div><div className="trade-outcome no-outcome"><span>NO</span><strong>{formatAmount(market.no_pool)} XLM</strong></div>
           {position && <p className="position-note">Your position: <strong>{position.side === 0 ? 'YES' : 'NO'}</strong> · {formatAmount(position.amount)} XLM</p>}
-          {canPredict && <form className="detail-trade-form" onSubmit={event => {event.preventDefault(); onPredict(market.id, side, amount);}}><div className="segmented-control" aria-label="Choose a side"><button type="button" className={side === 0 ? 'is-selected yes-selected' : ''} aria-pressed={side === 0} onClick={() => setSide(0)}>Buy YES</button><button type="button" className={side === 1 ? 'is-selected no-selected' : ''} aria-pressed={side === 1} onClick={() => setSide(1)}>Buy NO</button></div><label className="amount-input">Stake <span>XLM</span><input required inputMode="decimal" value={amount} onChange={event => setAmount(event.target.value)} /></label><button className="button button-primary market-submit" disabled={busy}>Place position</button></form>}
+          {canPredict && (
+            <form
+              className="detail-trade-form"
+              onSubmit={async (event) => {
+                event.preventDefault();
+                setSubmitError('');
+                if (!address) {
+                  onConnect?.();
+                  return;
+                }
+                try {
+                  await onPredict(market.id, side, amount);
+                } catch (err) {
+                  setSubmitError(err.message || 'Prediction failed');
+                }
+              }}
+            >
+              <div className="segmented-control" aria-label="Choose a side">
+                <button type="button" className={side === 0 ? 'is-selected yes-selected' : ''} aria-pressed={side === 0} onClick={() => setSide(0)}>Buy YES</button>
+                <button type="button" className={side === 1 ? 'is-selected no-selected' : ''} aria-pressed={side === 1} onClick={() => setSide(1)}>Buy NO</button>
+              </div>
+              <label className="amount-input">
+                Stake <span>XLM</span>
+                <input required inputMode="decimal" value={amount} onChange={event => setAmount(event.target.value)} />
+              </label>
+              {submitError && <p className="form-error" role="alert" style={{color: '#ff6b77', fontSize: '12px', margin: '4px 0'}}>{submitError}</p>}
+              <button className="button button-primary market-submit" disabled={busy}>
+                {!address ? 'Connect Freighter to place position' : busy ? 'Submitting to Freighter…' : 'Place position'}
+              </button>
+            </form>
+          )}
           {previewMode && <p className="preview-note">Sample market data · trading is read-only</p>}
           {closed && !timedOut && market.status === 0 && <button className="button button-secondary market-submit" disabled={busy || previewMode} onClick={() => onRequest(market.id)}>Request resolution</button>}
           {canClaim && <button className="button button-primary market-submit" disabled={busy || previewMode} onClick={() => onClaim(market.id)}>{timedOut || market.status === 3 ? 'Claim refund' : 'Claim winnings'}</button>}
