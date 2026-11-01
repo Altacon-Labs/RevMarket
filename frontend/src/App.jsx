@@ -2,7 +2,8 @@ import {useEffect, useRef, useState} from 'react';
 import {Navigate, Route, Routes, useLocation, useNavigate} from 'react-router-dom';
 import {createClient, normalizeMarket, sc} from '../../shared/stellar.mjs';
 import {formatAmount, parseAmount, priceUnits} from '../../shared/amount.mjs';
-import {connect, checkWallet, signer} from './lib/wallet.mjs';
+import {connect, checkWallet, signer, getExistingAddress} from './lib/wallet.mjs';
+import PhosphorIcon from './icons/PhosphorIcon.jsx';
 import {logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
 import {MOCK_MARKETS} from './lib/mock-data.mjs';
 import Header from './components/Header.jsx';
@@ -54,6 +55,32 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const source = address || env.VITE_READ_ACCOUNT;
   const currentSource = useRef(source);
   currentSource.current = source;
+  const [promptDismissed, setPromptDismissed] = useState(false);
+  const autoConnectAttempted = useRef(false);
+
+  // Auto-connect Freighter for returning users or upon Privy authentication
+  useEffect(() => {
+    let cancelled = false;
+    async function checkAutoConnect() {
+      if (address) return;
+      try {
+        const existing = await getExistingAddress();
+        if (!cancelled && existing) {
+          setAddress(existing);
+        } else if (authenticated && !autoConnectAttempted.current && !promptDismissed) {
+          autoConnectAttempted.current = true;
+          try {
+            const connected = await connect();
+            if (!cancelled && connected) setAddress(connected);
+          } catch {
+            // User can still connect via topbar button or banner
+          }
+        }
+      } catch {}
+    }
+    checkAutoConnect();
+    return () => { cancelled = true; };
+  }, [authenticated, address, promptDismissed]);
 
   async function refresh(isInitial = false) {
     if (isInitial) {
@@ -252,6 +279,21 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     <div className={`workspace${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`}>
       <Sidebar activePage={activePage} counts={counts} collapsed={sidebarCollapsed} address={address} onNavigate={navigate} />
       <main className="main-content">
+        {authenticated && !address && !promptDismissed && (
+          <div className="wallet-prompt-banner" role="region" aria-label="Connect wallet notice">
+            <div className="wallet-prompt-content">
+              <div className="wallet-prompt-icon"><PhosphorIcon name="wallet" size={20} /></div>
+              <div className="wallet-prompt-text">
+                <strong>Connect Freighter to trade on Stellar</strong>
+                <p>You are signed in. Connect your Freighter extension wallet to place predictions and manage positions.</p>
+              </div>
+            </div>
+            <div className="wallet-prompt-actions">
+              <button className="button button-primary" disabled={busy} onClick={() => runAction(connectWallet)}>Connect Freighter</button>
+              <button className="button button-quiet" aria-label="Dismiss banner" onClick={() => setPromptDismissed(true)}>Dismiss</button>
+            </div>
+          </div>
+        )}
         {message && <p className="status-message" role="status">{message}</p>}
         <Routes>
           <Route path="/" element={<Navigate to="/markets" replace />} />

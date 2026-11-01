@@ -3446,6 +3446,7 @@ a {
   font-weight: 700;
   color: #83c8ff;
 }
+
 .live-card-stats {
   display: flex;
   flex-direction: column;
@@ -3502,9 +3503,20 @@ a {
 }
 
 @keyframes pulse-dot {
-  0% { transform: scale(0.9); opacity: 0.7; }
-  50% { transform: scale(1.3); opacity: 1; }
-  100% { transform: scale(0.9); opacity: 0.7; }
+  0% {
+    transform: scale(0.9);
+    opacity: 0.7;
+  }
+
+  50% {
+    transform: scale(1.3);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(0.9);
+    opacity: 0.7;
+  }
 }
 
 .live-activity-text {
@@ -3623,4 +3635,160 @@ a {
 .market-card.market-card-live .market-card-body .market-category,
 .market-card.market-card-live .market-card-body .market-close {
   display: none !important;
+}
+
+/* Wallet Dropdown & Container */
+.wallet-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.wallet-button.has-dropdown {
+  gap: 8px;
+  padding-right: 10px;
+}
+
+.wallet-caret-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+
+.wallet-caret-icon.is-open {
+  transform: rotate(180deg);
+}
+
+.wallet-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  min-width: 200px;
+  background: #15191c;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wallet-dropdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+
+.wallet-dropdown-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.wallet-dropdown-full-address {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.wallet-dropdown-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wallet-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: #d7dce0;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.wallet-dropdown-item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.wallet-dropdown-item.is-destructive {
+  color: #f87171;
+}
+
+.wallet-dropdown-item.is-destructive:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+}
+
+/* Prompt Banner when logged in to Privy but Freighter not connected */
+.wallet-prompt-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  margin-bottom: 20px;
+  background: rgba(54, 152, 244, 0.08);
+  border: 1px solid rgba(54, 152, 244, 0.25);
+  border-radius: 12px;
+}
+
+.wallet-prompt-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.wallet-prompt-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(54, 152, 244, 0.15);
+  color: var(--blue);
+  flex-shrink: 0;
+}
+
+.wallet-prompt-text {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.wallet-prompt-text strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+.wallet-prompt-text p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.wallet-prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
