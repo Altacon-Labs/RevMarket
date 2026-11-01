@@ -21,6 +21,11 @@ export default function MarketCard({market, position, now, previewMode, variant 
     navigate(marketPath(market, side));
   };
 
+  // Extract optional bracketed category, e.g. "[Sports] Will Arsenal win..."
+  const categoryMatch = market.question.match(/^\[(.*?)\]\s*(.*)$/);
+  const displayCategory = categoryMatch ? categoryMatch[1] : (market.kind === 'Price' ? `${market.asset} price` : 'Event');
+  const displayQuestion = categoryMatch ? categoryMatch[2] : market.question;
+
   return (
     <article
       className={`market-card${isLive ? ' market-card-live is-unclickable' : ' is-card-clickable'}`}
@@ -33,7 +38,7 @@ export default function MarketCard({market, position, now, previewMode, variant 
           handleCardClick(e);
         }
       }}
-      aria-label={`Market: ${market.question}`}
+      aria-label={`Market: ${displayQuestion}`}
     >
       <div className="market-card-top">
         <MarketAvatar market={market} size={isLive ? 'large' : 'regular'} />
@@ -42,10 +47,10 @@ export default function MarketCard({market, position, now, previewMode, variant 
 
       <div className="market-card-body">
         <p className="market-category">
-          {market.kind === 'Price' ? `${market.asset} price` : 'Event market'} <span>· #{market.id}</span>
+          {displayCategory} <span>· #{market.id}</span>
         </p>
 
-        <h2 title={market.question}>{market.question}</h2>
+        <h2 title={displayQuestion}>{displayQuestion}</h2>
 
         <p className="market-close">Closes {new Date(Number(market.closes_at) * 1000).toLocaleString()}</p>
       </div>

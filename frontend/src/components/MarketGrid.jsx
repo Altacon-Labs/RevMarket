@@ -5,9 +5,9 @@ import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 
 function LiveMarketRow({markets, positions, now, previewMode, loading}) {
   const liveMarkets = markets.filter(market => market.status === 0 && now < Number(market.closes_at) && now <= Number(market.deadline));
-  // Create an extended repeated list to support a continuous, seamless sliding marquee
+  // Display real live markets; if fewer than 4 exist on-chain, repeat to create a rich marquee
   const sliderMarkets = liveMarkets.length > 0 
-    ? [...liveMarkets, ...liveMarkets, ...liveMarkets, ...liveMarkets]
+    ? (liveMarkets.length >= 4 ? liveMarkets : [...liveMarkets, ...liveMarkets, ...liveMarkets, ...liveMarkets])
     : [];
 
   return <section className="live-market-section" aria-labelledby="live-markets-title">
