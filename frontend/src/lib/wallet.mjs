@@ -1,4 +1,4 @@
-import {requestAccess, getAddress, getNetworkDetails, signTransaction} from '@stellar/freighter-api';
+import {requestAccess, getAddress, getNetworkDetails, signTransaction, isConnected, isAllowed} from '@stellar/freighter-api';
 import {Networks} from '../../../shared/stellar.mjs';
 
 export async function checkWallet(expectedAddress) {
@@ -16,6 +16,20 @@ export async function connect() {
   if (result.error || !result.address) throw new Error('Freighter connection was declined or the extension is unavailable');
   await checkWallet(result.address);
   return result.address;
+}
+
+export async function getExistingAddress() {
+  try {
+    const installed = await isConnected();
+    if (!installed || installed.error) return null;
+    const allowed = await isAllowed();
+    if (!allowed || allowed.error || !allowed.isAllowed) return null;
+    const account = await getAddress();
+    if (account.error || !account.address) return null;
+    return account.address;
+  } catch {
+    return null;
+  }
 }
 
 export function signer(address) {
