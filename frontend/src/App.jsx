@@ -16,6 +16,7 @@ import MarketDetailPage from './components/MarketDetailPage.jsx';
 import ProfilePage from './components/ProfilePage.jsx';
 import SettingsPage from './components/SettingsPage.jsx';
 import InfoPage from './components/InfoPage.jsx';
+import NotFoundPage from './components/NotFoundPage.jsx';
 import ActivityPage from './components/ActivityPage.jsx';
 
 const env = import.meta.env;
@@ -311,7 +312,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/privacy" element={<InfoPage page="privacy" />} />
           <Route path="/risk" element={<InfoPage page="risk" />} />
           <Route path="/licenses" element={<InfoPage page="licenses" />} />
-          <Route path="*" element={<InfoPage page="not-found" />} />
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
         <footer className="app-footer"><span>RevMarket</span></footer>
       </main>
