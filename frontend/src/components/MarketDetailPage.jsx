@@ -13,14 +13,27 @@ const chartRanges = {
   month: {label: '30D', seconds: 2_592_000, granularity: 21_600},
 };
 
-export default function MarketDetailPage({markets, positions, address, onConnect, busy, now, previewMode, onPredict, onClaim, onRequest}) {
+export default function MarketDetailPage({
+  markets,
+  positions,
+  address,
+  authenticated,
+  onConnect,
+  onLogin,
+  busy,
+  now,
+  previewMode,
+  onPredict,
+  onClaim,
+  onRequest,
+}) {
   const {slug} = useParams();
   const location = useLocation();
   const [side, setSide] = useState(() => {
     const value = new URLSearchParams(location.search).get('side');
     return value === '0' || value === '1' ? Number(value) : 0;
   });
-  const [amount, setAmount] = useState('1');
+  const [amount, setAmount] = useState('10');
   const [submitError, setSubmitError] = useState('');
   const [range, setRange] = useState('week');
   const [priceSeries, setPriceSeries] = useState(null);
@@ -63,7 +76,7 @@ export default function MarketDetailPage({markets, positions, address, onConnect
   const position = positions[market.id];
   const closed = now >= Number(market.closes_at);
   const timedOut = now > Number(market.deadline) && market.status < 2;
-  const canClaim = position && !position.claimed && (market.status === 3 || timedOut || market.status === 2 && position.side === market.outcome);
+  const canClaim = position && !position.claimed && (market.status === 3 || timedOut || (market.status === 2 && position.side === market.outcome));
   const status = timedOut ? 'Refundable' : closed && market.status === 0 ? 'Closed' : ['Open', 'Resolution requested', 'Settled', 'Refundable'][market.status];
   const totalPool = BigInt(market.yes_pool) + BigInt(market.no_pool);
   const yesShare = totalPool > 0n ? Number(BigInt(market.yes_pool) * 10000n / totalPool) / 100 : 50;
@@ -71,59 +84,261 @@ export default function MarketDetailPage({markets, positions, address, onConnect
   const canPredict = !previewMode && !closed && market.status === 0 && !position;
   const displayedCandles = priceSeries?.candles.filter(candle => candle.time >= Date.now() - chartRanges[range].seconds * 1000) || [];
 
-  return <div className="market-detail-page">
-    <Link className="back-link" to="/markets"><PhosphorIcon name="arrowLeft" size={14} /> All markets</Link>
-    <header className="detail-heading"><div className="detail-title-group"><MarketAvatar market={market} size="large" /><div><p className="eyebrow">{market.kind === 'Price' ? `${market.asset} PRICE MARKET` : 'EVENT MARKET'} · #{market.id}</p><h1>{market.question}</h1><p className="detail-meta"><span className="status-pill">{status}</span><span>Closes {new Date(Number(market.closes_at) * 1000).toLocaleString()}</span></p></div></div><button className="button button-secondary" onClick={() => navigator.clipboard?.writeText(window.location.href)}>Copy link</button></header>
-    <div className="detail-layout">
-      <div className="detail-main-column">
-        <section className="detail-chart-panel">
-          <div className="detail-section-heading"><div><p className="eyebrow">{market.kind === 'Price' ? 'LIVE PRICE HISTORY' : 'LIVE CONTRACT DATA'}</p><h2>{market.kind === 'Price' ? `${market.asset}/USD` : 'Pool distribution'}</h2></div>
-            {market.kind === 'Price' ? <div className="chart-range-controls" role="group" aria-label="Chart date range">{Object.entries(chartRanges).map(([id, value]) => <button key={id} type="button" className={range === id ? 'is-active' : ''} aria-pressed={range === id} onClick={() => setRange(id)}>{value.label}</button>)}</div> : <span className="detail-period">On-chain</span>}
+  // AMM / Order pricing computations
+  const currentPrice = side === 0 ? Math.max(0.01, yesShare / 100) : Math.max(0.01, noShare / 100);
+  const numericAmount = parseFloat(amount) || 0;
+  const estShares = numericAmount > 0 && currentPrice > 0 ? (numericAmount / currentPrice).toFixed(2) : '0.00';
+  const estPayout = numericAmount > 0 && currentPrice > 0 ? `${(numericAmount / currentPrice).toFixed(2)} XLM` : '0.00 XLM';
+  const estReturnMultiplier = currentPrice > 0 ? (1 / currentPrice).toFixed(2) : '1.00';
+
+  const isUserConnected = Boolean(address);
+  const isUserSignedIn = Boolean(authenticated);
+  const canPlaceOrder = isUserConnected || isUserSignedIn;
+
+  return (
+    <div className="market-detail-page">
+      <Link className="back-link" to="/markets">
+        <PhosphorIcon name="arrowLeft" size={14} /> All markets
+      </Link>
+      <header className="detail-heading">
+        <div className="detail-title-group">
+          <MarketAvatar market={market} size="large" />
+          <div>
+            <p className="eyebrow">{market.kind === 'Price' ? `${market.asset} PRICE MARKET` : 'EVENT MARKET'} · #{market.id}</p>
+            <h1>{market.question}</h1>
+            <p className="detail-meta">
+              <span className="status-pill">{status}</span>
+              <span>Total Volume: <strong>{formatAmount(totalPool)} XLM</strong></span>
+              <span>Closes {new Date(Number(market.closes_at) * 1000).toLocaleString()}</span>
+            </p>
           </div>
-          {market.kind === 'Price' ? chartLoading && !displayedCandles.length ? <div className="detail-chart-empty" role="status">Loading live Coinbase candles…</div> : chartError ? <div className="detail-chart-empty" role="status">{chartError}</div> : displayedCandles.length > 1 ? <MiniChart candles={displayedCandles} asset={market.asset} source={priceSeries.source} granularity={priceSeries.granularity} periodLabel={chartRanges[range].label} /> : <div className="detail-chart-empty" role="status">Not enough live candle data for this range.</div> : <><div className="probability-bar" role="img" aria-label={`YES pool share ${yesShare} percent, NO pool share ${noShare} percent`}><span style={{width: `${yesShare}%`}} /></div><div className="probability-labels"><span>YES pool share <strong>{yesShare.toFixed(2)}%</strong></span><span>NO pool share <strong>{noShare.toFixed(2)}%</strong></span></div><p className="chart-onchain-note">Computed from the current on-chain YES and NO pools.</p></>}
-        </section>
-        <section className="detail-panel"><p className="eyebrow">ABOUT THIS MARKET</p><h2>Resolution and timing</h2><p>{market.kind === 'Price' ? 'This price market resolves from the first supported observation after close. The resolver compares the observed USD price with the market target.' : 'This event market is resolved by the configured operator using the evidence policy for the question.'}</p><div className="detail-facts"><div><span>Market ID</span><strong>#{market.id}</strong></div><div><span>Closes</span><strong>{new Date(Number(market.closes_at) * 1000).toLocaleString()}</strong></div><div><span>Resolution deadline</span><strong>{new Date(Number(market.deadline) * 1000).toLocaleString()}</strong></div><div><span>Network</span><strong>Stellar</strong></div></div></section>
-      </div>
-      <aside className="detail-trade-column">
-        <section className="trade-panel"><div className="detail-section-heading"><div><p className="eyebrow">CURRENT POOLS</p><h2>Market liquidity</h2></div></div><div className="trade-outcome yes-outcome"><span>YES</span><strong>{formatAmount(market.yes_pool)} XLM</strong></div><div className="trade-outcome no-outcome"><span>NO</span><strong>{formatAmount(market.no_pool)} XLM</strong></div>
-          {position && <p className="position-note">Your position: <strong>{position.side === 0 ? 'YES' : 'NO'}</strong> · {formatAmount(position.amount)} XLM</p>}
-          {canPredict && (
-            <form
-              className="detail-trade-form"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                setSubmitError('');
-                if (!address) {
-                  onConnect?.();
-                  return;
-                }
-                try {
-                  await onPredict(market.id, side, amount);
-                } catch (err) {
-                  setSubmitError(err.message || 'Prediction failed');
-                }
-              }}
-            >
-              <div className="segmented-control" aria-label="Choose a side">
-                <button type="button" className={side === 0 ? 'is-selected yes-selected' : ''} aria-pressed={side === 0} onClick={() => setSide(0)}>Buy YES</button>
-                <button type="button" className={side === 1 ? 'is-selected no-selected' : ''} aria-pressed={side === 1} onClick={() => setSide(1)}>Buy NO</button>
+        </div>
+        <button className="button button-secondary" onClick={() => navigator.clipboard?.writeText(window.location.href)}>
+          Copy link
+        </button>
+      </header>
+
+      <div className="detail-layout">
+        <div className="detail-main-column">
+          <section className="detail-chart-panel">
+            <div className="detail-section-heading">
+              <div>
+                <p className="eyebrow">{market.kind === 'Price' ? 'LIVE PRICE HISTORY' : 'LIVE CONTRACT DATA'}</p>
+                <h2>{market.kind === 'Price' ? `${market.asset}/USD` : 'Pool distribution'}</h2>
               </div>
-              <label className="amount-input">
-                Stake <span>XLM</span>
-                <input required inputMode="decimal" value={amount} onChange={event => setAmount(event.target.value)} />
-              </label>
-              {submitError && <p className="form-error" role="alert" style={{color: '#ff6b77', fontSize: '12px', margin: '4px 0'}}>{submitError}</p>}
-              <button className="button button-primary market-submit" disabled={busy}>
-                {!address ? 'Connect Freighter to place position' : busy ? 'Submitting to Freighter…' : 'Place position'}
+              {market.kind === 'Price' ? (
+                <div className="chart-range-controls" role="group" aria-label="Chart date range">
+                  {Object.entries(chartRanges).map(([id, value]) => (
+                    <button key={id} type="button" className={range === id ? 'is-active' : ''} aria-pressed={range === id} onClick={() => setRange(id)}>
+                      {value.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <span className="detail-period">On-chain</span>
+              )}
+            </div>
+            {market.kind === 'Price' ? (
+              chartLoading && !displayedCandles.length ? (
+                <div className="detail-chart-empty" role="status">Loading live Coinbase candles…</div>
+              ) : chartError ? (
+                <div className="detail-chart-empty" role="status">{chartError}</div>
+              ) : displayedCandles.length > 1 ? (
+                <MiniChart candles={displayedCandles} asset={market.asset} source={priceSeries.source} granularity={priceSeries.granularity} periodLabel={chartRanges[range].label} />
+              ) : (
+                <div className="detail-chart-empty" role="status">Not enough live candle data for this range.</div>
+              )
+            ) : (
+              <>
+                <div className="probability-bar" role="img" aria-label={`YES pool share ${yesShare} percent, NO pool share ${noShare} percent`}>
+                  <span style={{width: `${yesShare}%`}} />
+                </div>
+                <div className="probability-labels">
+                  <span>YES share <strong>{yesShare.toFixed(2)}%</strong> ({(yesShare / 100).toFixed(2)} XLM)</span>
+                  <span>NO share <strong>{noShare.toFixed(2)}%</strong> ({(noShare / 100).toFixed(2)} XLM)</span>
+                </div>
+                <p className="chart-onchain-note">Computed from the current on-chain YES and NO liquidity pools.</p>
+              </>
+            )}
+          </section>
+
+          <section className="detail-panel">
+            <p className="eyebrow">ABOUT THIS MARKET</p>
+            <h2>Resolution and timing</h2>
+            <p>
+              {market.kind === 'Price'
+                ? 'This price market resolves from the first supported observation after close. The resolver compares the observed USD price with the market target.'
+                : 'This event market is resolved by the configured operator using the evidence policy for the question.'}
+            </p>
+            <div className="detail-facts">
+              <div><span>Market ID</span><strong>#{market.id}</strong></div>
+              <div><span>Total Liquidity</span><strong>{formatAmount(totalPool)} XLM</strong></div>
+              <div><span>Closes</span><strong>{new Date(Number(market.closes_at) * 1000).toLocaleString()}</strong></div>
+              <div><span>Resolution deadline</span><strong>{new Date(Number(market.deadline) * 1000).toLocaleString()}</strong></div>
+              <div><span>Network</span><strong>Stellar</strong></div>
+            </div>
+          </section>
+        </div>
+
+        <aside className="detail-trade-column">
+          <section className="trade-panel">
+            <div className="detail-section-heading">
+              <div>
+                <p className="eyebrow">ORDER BOOK & POOLS</p>
+                <h2>Trade position</h2>
+              </div>
+            </div>
+
+            <div className="trade-outcome yes-outcome">
+              <span>YES Pool</span>
+              <strong>{formatAmount(market.yes_pool)} XLM ({(yesShare / 100).toFixed(2)} XLM/share)</strong>
+            </div>
+            <div className="trade-outcome no-outcome">
+              <span>NO Pool</span>
+              <strong>{formatAmount(market.no_pool)} XLM ({(noShare / 100).toFixed(2)} XLM/share)</strong>
+            </div>
+
+            {position && (
+              <p className="position-note">
+                Your position: <strong>{position.side === 0 ? 'YES' : 'NO'}</strong> · {formatAmount(position.amount)} XLM
+              </p>
+            )}
+
+            {canPredict && (
+              <form
+                className="detail-trade-form"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  setSubmitError('');
+                  if (!address) {
+                    onConnect?.();
+                    return;
+                  }
+                  try {
+                    await onPredict(market.id, side, amount);
+                  } catch (err) {
+                    setSubmitError(err.message || 'Prediction failed');
+                  }
+                }}
+              >
+                <div className="segmented-control" aria-label="Choose a side">
+                  <button
+                    type="button"
+                    className={side === 0 ? 'is-selected yes-selected' : ''}
+                    aria-pressed={side === 0}
+                    onClick={() => setSide(0)}
+                  >
+                    Buy YES ({yesShare.toFixed(1)}¢)
+                  </button>
+                  <button
+                    type="button"
+                    className={side === 1 ? 'is-selected no-selected' : ''}
+                    aria-pressed={side === 1}
+                    onClick={() => setSide(1)}
+                  >
+                    Buy NO ({noShare.toFixed(1)}¢)
+                  </button>
+                </div>
+
+                <div className="amount-input-group">
+                  <label className="amount-input">
+                    Volume / Stake <span>XLM</span>
+                    <input
+                      required
+                      inputMode="decimal"
+                      value={amount}
+                      onChange={event => setAmount(event.target.value)}
+                      placeholder="e.g. 25"
+                    />
+                  </label>
+                  <div className="amount-preset-chips">
+                    {['5', '25', '100', '500'].map(preset => (
+                      <button
+                        key={preset}
+                        type="button"
+                        className="chip-preset"
+                        onClick={() => setAmount(preset)}
+                      >
+                        +{preset} XLM
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Live Order Simulation Quote */}
+                <div className="order-quote-summary">
+                  <div className="order-quote-row">
+                    <span>Average Share Price</span>
+                    <strong>{currentPrice.toFixed(4)} XLM</strong>
+                  </div>
+                  <div className="order-quote-row">
+                    <span>Est. Shares Received</span>
+                    <strong>{estShares} shares</strong>
+                  </div>
+                  <div className="order-quote-row is-highlight">
+                    <span>Potential Payout (at 1:1)</span>
+                    <strong className="order-quote-payout">{estPayout} ({estReturnMultiplier}x)</strong>
+                  </div>
+                </div>
+
+                {submitError && (
+                  <p className="form-error" role="alert" style={{color: '#ff6b77', fontSize: '12px', margin: '4px 0'}}>
+                    {submitError}
+                  </p>
+                )}
+
+                {/* Place Order button: only active when signed in or wallet connected */}
+                {canPlaceOrder ? (
+                  <button
+                    className="button button-primary market-submit"
+                    disabled={busy || !address}
+                    onClick={(e) => {
+                      if (!address) {
+                        e.preventDefault();
+                        onConnect?.();
+                      }
+                    }}
+                  >
+                    {!address ? 'Connect Freighter to submit order' : busy ? 'Submitting to Freighter…' : 'Place order'}
+                  </button>
+                ) : (
+                  <div className="place-order-auth-block">
+                    <button
+                      type="button"
+                      className="button button-primary market-submit"
+                      onClick={() => (onLogin ? onLogin() : onConnect?.())}
+                    >
+                      Sign in or connect wallet to place order
+                    </button>
+                    <p className="auth-hint-text">Connect Freighter or sign in with your account to trade.</p>
+                  </div>
+                )}
+              </form>
+            )}
+
+            {previewMode && <p className="preview-note">Sample market data · trading is read-only</p>}
+            {closed && !timedOut && market.status === 0 && (
+              <button className="button button-secondary market-submit" disabled={busy || previewMode} onClick={() => onRequest(market.id)}>
+                Request resolution
               </button>
-            </form>
-          )}
-          {previewMode && <p className="preview-note">Sample market data · trading is read-only</p>}
-          {closed && !timedOut && market.status === 0 && <button className="button button-secondary market-submit" disabled={busy || previewMode} onClick={() => onRequest(market.id)}>Request resolution</button>}
-          {canClaim && <button className="button button-primary market-submit" disabled={busy || previewMode} onClick={() => onClaim(market.id)}>{timedOut || market.status === 3 ? 'Claim refund' : 'Claim winnings'}</button>}
-        </section>
-        <section className="detail-panel"><p className="eyebrow">YOUR MARKET</p><h2>Keep track</h2><p>Positions are tied to the connected Stellar address. Sign in with Privy for your RevMarket account, or connect Freighter to authorize Stellar transactions.</p><Link className="market-card-cta" to="/profile">View profile <PhosphorIcon name="arrowRight" size={14} /></Link></section>
-      </aside>
+            )}
+            {canClaim && (
+              <button className="button button-primary market-submit" disabled={busy || previewMode} onClick={() => onClaim(market.id)}>
+                {timedOut || market.status === 3 ? 'Claim refund' : 'Claim winnings'}
+              </button>
+            )}
+          </section>
+
+          <section className="detail-panel">
+            <p className="eyebrow">YOUR MARKET</p>
+            <h2>Keep track</h2>
+            <p>Positions are tied to the connected Stellar address. Sign in with Privy for your RevMarket account, or connect Freighter to authorize Stellar transactions.</p>
+            <Link className="market-card-cta" to="/profile">
+              View profile <PhosphorIcon name="arrowRight" size={14} />
+            </Link>
+          </section>
+        </aside>
+      </div>
     </div>
-  </div>;
+  );
 }
