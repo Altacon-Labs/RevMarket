@@ -3792,3 +3792,116 @@ a {
   gap: 8px;
   flex-shrink: 0;
 }
+
+/* Market Category & Volume Row */
+.market-category-row {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+  margin: 8px 0 4px !important;
+}
+
+.market-category-row .market-category {
+  margin: 0 !important;
+  font-size: 11px !important;
+  line-height: 16px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  color: var(--muted) !important;
+}
+
+.market-volume-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  padding: 1px 6px !important;
+  border-radius: 6px !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid var(--line) !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  color: var(--muted) !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+/* Trade Volume Inputs & Preset Chips */
+.amount-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.amount-preset-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chip-preset {
+  background: var(--surface-hover);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chip-preset:hover {
+  background: var(--surface-active, rgba(255, 255, 255, 0.1));
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Order Quote Summary */
+.order-quote-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.order-quote-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.order-quote-row strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.order-quote-row.is-highlight {
+  padding-top: 4px;
+  border-top: 1px dashed var(--line);
+  color: var(--text);
+}
+
+.order-quote-payout {
+  color: #38bdf8 !important;
+  font-weight: 700 !important;
+}
+
+/* Place Order Auth Block */
+.place-order-auth-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-hint-text {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}

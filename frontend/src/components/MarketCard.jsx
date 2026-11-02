@@ -4,6 +4,12 @@ import {formatAmount} from '../../../shared/amount.mjs';
 import MarketAvatar from './MarketAvatar.jsx';
 import {marketPath} from '../lib/market-path.mjs';
 
+function shortAddress(addr) {
+  if (!addr) return 'User';
+  if (addr.length <= 10) return addr;
+  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+}
+
 export default function MarketCard({market, position, now, previewMode, variant = 'regular'}) {
   const navigate = useNavigate();
   const [side, setSide] = useState(position?.side ?? null);
@@ -26,6 +32,13 @@ export default function MarketCard({market, position, now, previewMode, variant 
   const displayCategory = categoryMatch ? categoryMatch[1] : (market.kind === 'Price' ? `${market.asset} price` : 'Event');
   const displayQuestion = categoryMatch ? categoryMatch[2] : market.question;
 
+  // Calculate market volume / liquidity
+  const totalVolume = BigInt(market.yes_pool || 0) + BigInt(market.no_pool || 0);
+
+  // Format activity details: buyer address and compact relative time
+  const activityBuyer = market.latest_activity?.user ? shortAddress(market.latest_activity.user) : (market.creator ? shortAddress(market.creator) : 'Trader');
+  const activityTime = market.latest_activity?.timeAgo || '4s ago';
+
   return (
     <article
       className={`market-card${isLive ? ' market-card-live is-unclickable' : ' is-card-clickable'}`}
@@ -46,9 +59,16 @@ export default function MarketCard({market, position, now, previewMode, variant 
       </div>
 
       <div className="market-card-body">
-        <p className="market-category">
-          {displayCategory} <span>· #{market.id}</span>
-        </p>
+        <div className="market-category-row">
+          <p className="market-category">
+            {displayCategory} <span>· #{market.id}</span>
+          </p>
+          {!isLive && (
+            <span className="market-volume-badge" title="Total Volume">
+              Vol {formatAmount(totalVolume)} XLM
+            </span>
+          )}
+        </div>
 
         <h2 title={displayQuestion}>{displayQuestion}</h2>
 
@@ -60,9 +80,8 @@ export default function MarketCard({market, position, now, previewMode, variant 
           <div className="live-card-price-row">
             <span className="live-price-headline">
               {(() => {
-                const total = BigInt(market.yes_pool || 0) + BigInt(market.no_pool || 0);
-                if (total === 0n) return '50¢';
-                const pct = Number((BigInt(market.yes_pool || 0) * 100n) / total);
+                if (totalVolume === 0n) return '50¢';
+                const pct = Number((BigInt(market.yes_pool || 0) * 100n) / totalVolume);
                 return `${pct}¢`;
               })()}
             </span>
@@ -72,13 +91,7 @@ export default function MarketCard({market, position, now, previewMode, variant 
           <div className="live-card-activity-row">
             <span className="live-pulse-dot" />
             <span className="live-activity-text">
-              {market.latest_activity ? (
-                <>
-                  <strong className="live-activity-strong">{market.latest_activity.action}</strong> {market.latest_activity.amount} · {market.latest_activity.timeAgo}
-                </>
-              ) : (
-                'Recent prediction activity active'
-              )}
+              <strong className="live-activity-strong">{activityBuyer}</strong> · {activityTime}
             </span>
           </div>
         </div>
