@@ -8,8 +8,8 @@ export default function NotFoundPage() {
         <Link className="not-found-help-icon" to="/how-to-use" title="Help & guide" aria-label="Help & guide">
           <PhosphorIcon name="info" size={17} />
         </Link>
-        <div className="not-found-badge">
-          <span className="not-found-code">404</span>
+        <div className="">
+          <span className="not-found-code">404 </span>
           <span className="not-found-tag">PAGE NOT FOUND</span>
         </div>
         <h1>Lost in the markets?</h1>
