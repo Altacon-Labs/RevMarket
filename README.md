@@ -101,6 +101,7 @@ npm run test:contracts
 npm run build:contracts
 ```
 
+ 
 Project-specific expectations:
 
 - financial logic must preserve escrow rules and payout integrity
