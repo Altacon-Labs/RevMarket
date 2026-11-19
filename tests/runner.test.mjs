@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {scValToNative} from '@stellar/stellar-sdk';
+import {scValToNative, Networks} from '@stellar/stellar-sdk';
 import {processMarket} from '../service/runner.mjs';
 import {sc} from '../shared/stellar.mjs';
 import {digest} from '../service/policy.mjs';
+import {createAttemptStore} from '../service/attempts.mjs';
+import {mkdtempSync, rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 function fixture(kind=['Price','ETH',100n]) {
   const m={status:0,closes_at:200n,deadline:86600n,kind,question:'Question'};const writes=[],saved=[];
   return {m,writes,saved,options:{id:4,source:'test',sign:()=>{},now:()=>205,
@@ -28,4 +32,33 @@ test('Soroban wire encoding preserves enum and 128-bit types',()=>{
   assert.deepEqual(scValToNative(sc.kind('ETH',123n)),['Price','ETH',123n]);
   assert.deepEqual(scValToNative(sc.kind(null,0)),['Event']);
   assert.equal(scValToNative(sc.i128(90071992547409931n)),90071992547409931n);
+});
+
+test('persisted signed attempt is submitted after restart without changing evidence or sequence',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'revmarket-attempt-'));const store=createAttemptStore(join(dir,'attempts.sqlite'));
+  try {
+    const f=fixture();let submitted=0;const states=['unknown','confirmed'];
+    Object.assign(f.options,{attemptStore:store,client:{...f.options.client,
+      prepare:async()=>({hash:'tx-hash',xdr:'signed-xdr',sequence:'42'}),submit:async xdr=>{assert.equal(xdr,'signed-xdr');submitted++;},
+      inspect:async()=>({status:states.shift()})}});
+    assert.equal(await processMarket(f.options),'unknown');
+    const saved=store.get(Networks.TESTNET,'test-contract',4);
+    assert.equal(saved.hash,'tx-hash');assert.equal(saved.sequence,'42');assert.equal(saved.evidence_hash,f.saved[0].hash);
+    assert.equal(await processMarket(f.options),'settled');assert.equal(submitted,1);
+    assert.equal(store.get(Networks.TESTNET,'test-contract',4).status,'confirmed');
+  } finally {store.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('prepared attempts recover before submission and failed or expired attempts remain distinct',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'revmarket-attempt-'));const store=createAttemptStore(join(dir,'attempts.sqlite'));
+  try {
+    const f=fixture();let submitted=0;let state='pending';
+    Object.assign(f.options,{attemptStore:store,client:{...f.options.client,
+      prepare:async()=>({hash:'tx-hash',xdr:'signed-xdr',sequence:'9'}),submit:async()=>{submitted++;},
+      inspect:async()=>({status:state})}});
+    store.begin({network:Networks.TESTNET,contract:'test-contract',market:4,hash:'tx-hash',signedXdr:'signed-xdr',evidenceHash:'evidence',sequence:'9'});
+    assert.equal(await processMarket(f.options),'pending');assert.equal(submitted,1);
+    state='failed';assert.equal(await processMarket(f.options),'failed');
+    assert.equal(store.get(Networks.TESTNET,'test-contract',4).status,'failed');
+  } finally {store.close();rmSync(dir,{recursive:true,force:true});}
 });

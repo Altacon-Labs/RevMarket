@@ -21,7 +21,40 @@ export function createClient({rpcUrl, contractId, networkPassphrase = Networks.T
   const contract = new Contract(contractId);
   const build = (source, method, args) => new TransactionBuilder(source, {fee:'10000', networkPassphrase})
     .addOperation(contract.call(method, ...args)).setTimeout(120).build();
+  const inspect = async hash => {
+    const receipt = await server.getTransaction(hash);
+    if (receipt.status === 'SUCCESS') return {status:'confirmed', hash, value:receipt.returnValue ? scValToNative(receipt.returnValue) : null};
+    if (receipt.status === 'FAILED') return {status:'failed', hash};
+    if (receipt.status === 'NOT_FOUND') return {status:'unknown', hash};
+    return {status:'pending', hash};
+  };
   return {
+    async prepare(source, sign, method, args = []) {
+      const account = await server.getAccount(source);
+      const tx = build(account, method, args);
+      const prepared = await server.prepareTransaction(tx);
+      if (BigInt(prepared.fee) > maxFee) throw new Error('Estimated transaction fee exceeds 1 XLM limit');
+      const signed = await sign(prepared.toXDR(), networkPassphrase);
+      const signedTx = TransactionBuilder.fromXDR(signed, networkPassphrase);
+      return {hash:signedTx.hash().toString('hex'), xdr:signed, sequence:account.sequenceNumber()};
+    },
+    async submit(signedXdr) {
+      const result = await server.sendTransaction(TransactionBuilder.fromXDR(signedXdr, networkPassphrase));
+      if (!['PENDING','DUPLICATE'].includes(result.status)) throw new Error(`Submission rejected: ${result.status}`);
+      return result.hash;
+    },
+    inspect,
+    async writePrepared(signedXdr, hash) {
+      const submittedHash = await this.submit(signedXdr);
+      if (submittedHash !== hash) throw new Error(`Submitted transaction hash mismatch: ${submittedHash}`);
+      for (let i = 0; i < 45; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        const state = await inspect(hash);
+        if (state.status === 'confirmed') return state;
+        if (state.status === 'failed') throw new Error(`Transaction failed: ${hash}`);
+      }
+      throw new Error(`Confirmation timed out; check hash before retrying: ${hash}`);
+    },
     async read(source, method, args = []) {
       // Read-only simulation needs no wallet signature. RPC checks source existence.
       const tx = build(new Account(source, '0'), method, args);
@@ -30,19 +63,15 @@ export function createClient({rpcUrl, contractId, networkPassphrase = Networks.T
       return scValToNative(sim.result.retval);
     },
     async write(source, sign, method, args = []) {
-      const tx = build(await server.getAccount(source), method, args);
-      const prepared = await server.prepareTransaction(tx);
-      if (BigInt(prepared.fee) > maxFee) throw new Error('Estimated transaction fee exceeds 1 XLM limit');
-      const signed = await sign(prepared.toXDR(), networkPassphrase);
-      const result = await server.sendTransaction(TransactionBuilder.fromXDR(signed, networkPassphrase));
-      if (!['PENDING','DUPLICATE'].includes(result.status)) throw new Error(`Submission rejected: ${result.status}`);
+      const prepared = await this.prepare(source, sign, method, args);
       for (let i = 0; i < 45; i++) {
+        if (i === 0) await this.submit(prepared.xdr);
         await new Promise(resolve => setTimeout(resolve, 1500));
-        const receipt = await server.getTransaction(result.hash);
-        if (receipt.status === 'SUCCESS') return {hash: result.hash, value: receipt.returnValue ? scValToNative(receipt.returnValue) : null};
-        if (receipt.status === 'FAILED') throw new Error(`Transaction failed: ${result.hash}`);
+        const state = await inspect(prepared.hash);
+        if (state.status === 'confirmed') return state;
+        if (state.status === 'failed') throw new Error(`Transaction failed: ${prepared.hash}`);
       }
-      throw new Error(`Confirmation timed out; check hash before retrying: ${result.hash}`);
+      throw new Error(`Confirmation timed out; check hash before retrying: ${prepared.hash}`);
     },
   };
 }
