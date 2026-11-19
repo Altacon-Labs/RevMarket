@@ -28,6 +28,7 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 - `server.mjs`: environment, local listener and shutdown.
 - `app.mjs`: version-1 HTTP routes, signed challenges, sessions, validation and limits.
 - `store.mjs`: SQLite schema version and persistence boundary. Add reviewed migrations when evolving the schema; newer databases are refused by older code.
+- `backup.mjs`: online `VACUUM INTO` backup, restore verification and guarded promotion; see [docs/BACKUP_RESTORE.md](../docs/BACKUP_RESTORE.md) (`npm run db:backup`, `db:restore-verify`, `db:drill`).
 - `frontend/src/lib/backend.mjs`: same-origin API and explicit Freighter message sign-in.
 - `frontend/src/BackendPanel.jsx`: optional profile/activity UI. Market transactions continue through the Stellar wallet even if this service is offline.
 

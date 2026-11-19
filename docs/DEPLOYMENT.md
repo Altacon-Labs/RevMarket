@@ -29,7 +29,7 @@ Frontend build values are public and generally fixed at build time. Rebuild when
 
 Set environment values in the backend process; its `.env.example` is documentation and is not automatically loaded. `npm run backend` listens on `127.0.0.1:3001`. Defaults: `APP_ORIGIN=http://127.0.0.1:5173`, database `backend/data/revmarket.sqlite`. `BACKEND_PORT`, `BACKEND_DB`, `SUPER_ADMIN_WALLETS` and server-only `PINATA_JWT` are supported. The Vite proxy target must match the selected backend port. Use the exact origin, not `localhost` as an interchangeable name.
 
-Pinata is needed for the UI's event image-upload path; backend signed-wallet authentication and matching upload wallet are required. Images are public IPFS content. Price creation without an image does not need pinning. Test session sign-in separately from Privy app login and chain signing. Back up SQLite privately; it stores unverified reports and is not the authoritative ledger.
+Pinata is needed for the UI's event image-upload path; backend signed-wallet authentication and matching upload wallet are required. Images are public IPFS content. Price creation without an image does not need pinning. Test session sign-in separately from Privy app login and chain signing. Back up SQLite privately; it stores unverified reports and is not the authoritative ledger. See [BACKUP_RESTORE.md](BACKUP_RESTORE.md) for online backup, restore verification, cutover and rollback.
 
 ### Hosting requirements
 
