@@ -32,7 +32,7 @@ function draftBody(overrides={}){
 test('schema v2 creates draft/review tables and v1 data survives migration',async t=>{
   const db=openStore(':memory:');
   t.after(()=>db.close());
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version,2);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version,3);
   // All new tables exist
   for(const table of ['drafts','draft_revisions','review_decisions','audit_events','reviewers']){
     assert.ok(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(table),`Table ${table} should exist`);
@@ -51,7 +51,7 @@ test('schema rejects future versions',()=>{
   // openStore(':memory:') always starts fresh, so test with a file
   // We test the version guard logic separately
   const db2=openStore(':memory:');
-  assert.equal(db2.prepare('PRAGMA user_version').get().user_version,2);
+  assert.equal(db2.prepare('PRAGMA user_version').get().user_version,3);
   db2.close();
 });
 

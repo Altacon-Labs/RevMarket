@@ -4,7 +4,7 @@ export function openStore(filename) {
   const db=new DatabaseSync(filename);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
   const version=db.prepare('PRAGMA user_version').get().user_version;
-  if(version>2){db.close();throw new Error('Database schema is newer than this backend');}
+  if(version>3){db.close();throw new Error('Database schema is newer than this backend');}
   if(version===0) db.exec(`
     BEGIN;
     CREATE TABLE users(wallet TEXT PRIMARY KEY, created_at INTEGER NOT NULL, last_login INTEGER NOT NULL);
@@ -82,6 +82,63 @@ export function openStore(filename) {
     );
     CREATE INDEX audit_events_draft ON audit_events(draft_id, id DESC);
     PRAGMA user_version=2;
+    COMMIT;
+  `);
+  if(db.prepare('PRAGMA user_version').get().user_version===2) db.exec(`
+    BEGIN;
+    CREATE TABLE market_events(
+      id INTEGER PRIMARY KEY,
+      network_passphrase TEXT NOT NULL,
+      contract_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      tx_hash TEXT NOT NULL,
+      ledger INTEGER NOT NULL,
+      ledger_closed_at TEXT NOT NULL,
+      market_id INTEGER NOT NULL,
+      event_type TEXT NOT NULL CHECK(event_type IN ('create','prediction','settlement','claim')),
+      raw_topic TEXT NOT NULL CHECK(raw_topic IN ('created','predict','settled','claimed')),
+      actor_wallet TEXT,
+      side INTEGER CHECK(side IS NULL OR side IN (0,1)),
+      outcome INTEGER CHECK(outcome IS NULL OR outcome IN (0,1)),
+      confidence INTEGER CHECK(confidence IS NULL OR (confidence>=8000 AND confidence<=10000)),
+      closes_at TEXT,
+      amount TEXT,
+      payload_json TEXT NOT NULL,
+      indexed_at INTEGER NOT NULL,
+      UNIQUE(network_passphrase, contract_id, event_id)
+    );
+    CREATE INDEX market_events_contract_ledger ON market_events(network_passphrase, contract_id, ledger ASC, id ASC);
+    CREATE INDEX market_events_actor ON market_events(actor_wallet, ledger DESC, id DESC) WHERE actor_wallet IS NOT NULL;
+    CREATE INDEX market_events_market ON market_events(contract_id, market_id, ledger ASC, id ASC);
+    CREATE TABLE ingestion_checkpoints(
+      network_passphrase TEXT NOT NULL,
+      contract_id TEXT NOT NULL,
+      cursor TEXT,
+      last_ledger INTEGER,
+      oldest_rpc_ledger INTEGER,
+      latest_rpc_ledger INTEGER,
+      status TEXT NOT NULL DEFAULT 'idle' CHECK(status IN ('idle','complete','gap','unavailable')),
+      has_gaps INTEGER NOT NULL DEFAULT 0 CHECK(has_gaps IN (0,1)),
+      gap_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(network_passphrase, contract_id)
+    );
+    CREATE TABLE ingestion_gaps(
+      id INTEGER PRIMARY KEY,
+      network_passphrase TEXT NOT NULL,
+      contract_id TEXT NOT NULL,
+      reason TEXT NOT NULL CHECK(reason IN ('cursor_expired','start_ledger_pruned','rpc_unavailable')),
+      prior_cursor TEXT,
+      from_ledger INTEGER,
+      to_ledger INTEGER,
+      oldest_rpc_ledger INTEGER,
+      latest_rpc_ledger INTEGER,
+      detail TEXT NOT NULL,
+      detected_at INTEGER NOT NULL
+    );
+    CREATE INDEX ingestion_gaps_scope ON ingestion_gaps(network_passphrase, contract_id, id DESC);
+    PRAGMA user_version=3;
     COMMIT;
   `);
   return db;
