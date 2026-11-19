@@ -4,10 +4,11 @@ use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_wit
 const TTL: u32 = 1_036_800;
 const MAX_POOL: i128 = 1_000_000_000_000_000_000;
 const GRACE: u64 = 86_400;
+const MAX_PERMIT: u64 = 2_592_000;
 
 #[contracttype]
 #[derive(Clone)]
-pub enum Key { Config, Count, Market(u32), Position(u32, Address) }
+pub enum Key { Config, Count, Market(u32), Position(u32, Address), ClaimPermit(Address) }
 #[contracttype]
 #[derive(Clone)]
 pub struct Config { pub token: Address, pub resolver: Address }
@@ -25,10 +26,13 @@ pub struct Market {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Position { pub amount: i128, pub side: u32, pub claimed: bool }
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClaimPermit { pub keeper: Address, pub expires_at: u64 }
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum Error { Missing = 1, Invalid = 2, Closed = 3, Duplicate = 4, NotReady = 5, Nothing = 6, Overflow = 7 }
+pub enum Error { Missing = 1, Invalid = 2, Closed = 3, Duplicate = 4, NotReady = 5, Nothing = 6, Overflow = 7, Denied = 8 }
 
 fn config(e: &Env) -> Config {
     e.storage().instance().extend_ttl(TTL / 2, TTL);
@@ -60,6 +64,26 @@ fn settle_inner(e: &Env, id: u32, outcome: u32, confidence: u32, evidence: Bytes
 fn settle(e: &Env, id: u32, outcome: u32, confidence: u32, evidence: BytesN<32>) {
     config(e).resolver.require_auth();
     settle_inner(e, id, outcome, confidence, evidence);
+}
+
+fn claim_inner(e: &Env, user: Address, id: u32) -> i128 {
+    let c = config(e);
+    let mut m = market(e, id);
+    if m.status < 2 && e.ledger().timestamp() > m.deadline { m.status = 3; save(e, id, &m); }
+    if m.status < 2 { panic_with_error!(e, Error::NotReady); }
+    let key = Key::Position(id, user.clone());
+    let mut p: Position = e.storage().persistent().get(&key).unwrap_or_else(|| panic_with_error!(e, Error::Nothing));
+    if p.claimed || (m.status == 2 && p.side != m.outcome) { panic_with_error!(e, Error::Nothing); }
+    let payout = if m.status == 3 { p.amount } else {
+        let winning = if m.outcome == 0 { m.yes_pool } else { m.no_pool };
+        p.amount * (m.yes_pool + m.no_pool) / winning
+    };
+    p.claimed = true;
+    e.storage().persistent().set(&key, &p);
+    e.storage().persistent().extend_ttl(&key, TTL / 2, TTL);
+    token::Client::new(e, &c.token).transfer(&e.current_contract_address(), &user, &payout);
+    e.events().publish((symbol_short!("claimed"), id), (user, payout));
+    payout
 }
 
 #[contract]
@@ -124,23 +148,34 @@ impl RevMarket {
     }
     pub fn claim(e: Env, user: Address, id: u32) -> i128 {
         user.require_auth();
-        let c = config(&e);
-        let mut m = market(&e, id);
-        if m.status < 2 && e.ledger().timestamp() > m.deadline { m.status = 3; save(&e, id, &m); }
-        if m.status < 2 { panic_with_error!(&e, Error::NotReady); }
-        let key = Key::Position(id, user.clone());
-        let mut p: Position = e.storage().persistent().get(&key).unwrap_or_else(|| panic_with_error!(&e, Error::Nothing));
-        if p.claimed || (m.status == 2 && p.side != m.outcome) { panic_with_error!(&e, Error::Nothing); }
-        let payout = if m.status == 3 { p.amount } else {
-            let winning = if m.outcome == 0 { m.yes_pool } else { m.no_pool };
-            p.amount * (m.yes_pool + m.no_pool) / winning
-        };
-        p.claimed = true;
-        e.storage().persistent().set(&key, &p);
+        claim_inner(&e, user, id)
+    }
+    pub fn grant_claimer(e: Env, owner: Address, keeper: Address, expires_at: u64) {
+        owner.require_auth();
+        config(&e);
+        let now = e.ledger().timestamp();
+        if keeper == owner || expires_at <= now || expires_at > now + MAX_PERMIT { panic_with_error!(&e, Error::Invalid); }
+        let key = Key::ClaimPermit(owner.clone());
+        e.storage().persistent().set(&key, &ClaimPermit { keeper: keeper.clone(), expires_at });
         e.storage().persistent().extend_ttl(&key, TTL / 2, TTL);
-        token::Client::new(&e, &c.token).transfer(&e.current_contract_address(), &user, &payout);
-        e.events().publish((symbol_short!("claimed"), id), (user, payout));
-        payout
+        e.events().publish((symbol_short!("grant"), owner), (keeper, expires_at));
+    }
+    pub fn revoke_claimer(e: Env, owner: Address) {
+        owner.require_auth();
+        config(&e);
+        e.storage().persistent().remove(&Key::ClaimPermit(owner.clone()));
+        e.events().publish((symbol_short!("revoke"), owner), ());
+    }
+    pub fn get_claimer(e: Env, owner: Address) -> Option<ClaimPermit> {
+        config(&e);
+        e.storage().persistent().get(&Key::ClaimPermit(owner))
+    }
+    pub fn claim_for(e: Env, keeper: Address, owner: Address, id: u32) -> i128 {
+        keeper.require_auth();
+        config(&e);
+        let p: ClaimPermit = e.storage().persistent().get(&Key::ClaimPermit(owner.clone())).unwrap_or_else(|| panic_with_error!(&e, Error::Denied));
+        if p.keeper != keeper || e.ledger().timestamp() >= p.expires_at { panic_with_error!(&e, Error::Denied); }
+        claim_inner(&e, owner, id)
     }
     pub fn get_market(e: Env, id: u32) -> Market { config(&e); market(&e, id) }
     pub fn get_position(e: Env, id: u32, user: Address) -> Option<Position> {
