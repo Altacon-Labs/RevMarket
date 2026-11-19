@@ -16,6 +16,7 @@
     "dev": "npm run dev --workspace frontend",
     "build": "npm run build --workspace frontend",
     "resolve": "npm run resolve --workspace service",
-    "demo": "node scripts/demo.mjs"
+    "demo": "node scripts/demo.mjs",
+    "evidence:export": "node scripts/export-evidence.mjs"
   }
 }
