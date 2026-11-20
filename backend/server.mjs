@@ -1,18 +1,61 @@
 import {mkdir} from 'node:fs/promises';
-import {fileURLToPath} from 'node:url';
-import {dirname,resolve} from 'node:path';
-import {openStore} from './store.mjs';
-import {createApi} from './app.mjs';
-const filename=process.env.BACKEND_DB?resolve(process.env.BACKEND_DB):fileURLToPath(new URL('./data/revmarket.sqlite',import.meta.url));
-const port=Number(process.env.BACKEND_PORT||3001);
-const superAdminWallets=(process.env.SUPER_ADMIN_WALLETS||'').split(',').map(wallet=>wallet.trim()).filter(Boolean);
-const pinataJwt=process.env.PINATA_JWT||'';
-if(!Number.isInteger(port)||port<1||port>65535)throw new Error('Invalid BACKEND_PORT');
-await mkdir(dirname(filename),{recursive:true});
-const db=openStore(filename);
-const server=createApi({db,appOrigin:process.env.APP_ORIGIN||'http://127.0.0.1:5173',superAdminWallets,pinataJwt});
-server.on('error',()=>{console.error('Backend could not listen; check local port and configuration');db.close();process.exitCode=1;});
-server.listen(port,'127.0.0.1',()=>console.log(`RevMarket backend: http://127.0.0.1:${port}/api/health`));
-let stopping=false;
-function stop(){if(stopping)return;stopping=true;server.close(()=>{db.close();});server.closeIdleConnections();}
-process.on('SIGINT',stop);process.on('SIGTERM',stop);
+import {dirname} from 'node:path';
+import {createGracefulShutdown, resolveBackendConfig} from './config.mjs';
+
+let config;
+try {
+  config = resolveBackendConfig(process.env);
+} catch (err) {
+  const code = err?.code || 'CONFIG_ERROR';
+  process.stderr.write(`Backend startup failed [${code}]: ${err.message}\n`);
+  process.exit(1);
+}
+
+const [{openStore}, {createApi}] = await Promise.all([
+  import('./store.mjs'),
+  import('./app.mjs'),
+]);
+
+if (config.filename !== ':memory:') {
+  await mkdir(dirname(config.filename), {recursive: true});
+}
+const db = openStore(config.filename);
+const server = createApi({
+  db,
+  appOrigin: config.appOrigin,
+  superAdminWallets: config.superAdminWallets,
+  pinataJwt: config.pinataJwt,
+  aiConfig: config.aiConfig,
+});
+const shutdown = createGracefulShutdown({
+  server,
+  db,
+  shutdownTimeoutMs: config.shutdownTimeoutMs,
+});
+server.on('error', () => {
+  console.error('Backend could not listen; check local port and configuration');
+  try {
+    db.close();
+  } catch {
+    // ignore close error
+  }
+  process.exitCode = 1;
+});
+const displayHost = config.host === '0.0.0.0' ? '127.0.0.1' : config.host;
+server.listen(config.port, config.host, () => {
+  console.log(`RevMarket backend: http://${displayHost}:${config.port}/api/health`);
+});
+function handleSignal() {
+  shutdown.stop().then(() => {
+    if (typeof process.disconnect === 'function' && process.connected) {
+      process.disconnect();
+    }
+  });
+}
+process.on('SIGINT', handleSignal);
+process.on('SIGTERM', handleSignal);
+process.on('message', msg => {
+  if (msg === 'shutdown' || msg?.type === 'shutdown') {
+    handleSignal();
+  }
+});

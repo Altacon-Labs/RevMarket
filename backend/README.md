@@ -19,13 +19,14 @@ npm run dev
 
 Use `http://127.0.0.1:5173` exactly. The development server proxies `/api` to `http://127.0.0.1:3001`. Do not switch to `localhost` or a different port without updating APP_ORIGIN. Backend health is `http://127.0.0.1:3001/api/health`. Direct API writes also require the matching Origin header.
 
-The example environment file documents options; set them in the process environment if needed (it is not auto-loaded). Defaults: BACKEND_PORT=3001; APP_ORIGIN=http://127.0.0.1:5173; database backend/data/revmarket.sqlite. BACKEND_DB can override its path. Set `SUPER_ADMIN_WALLETS` to comma-separated Stellar G-addresses for the super-admin network panel; the backend verifies the wallet against a signed session. Set `PINATA_JWT` on the backend to enable public IPFS image pinning; never place it in a frontend `VITE_*` variable. The Vite development proxy targets port 3001, so change its target when changing BACKEND_PORT.
+The example environment file documents options; set them in the process environment if needed (it is not auto-loaded). `backend/server.mjs` validates configuration through `backend/config.mjs` before creating directories, opening SQLite, or listening; missing or invalid configuration fails with variable names only. Defaults in `BACKEND_ENV=local`: `BACKEND_HOST=127.0.0.1`; `BACKEND_PORT=3001`; `APP_ORIGIN=http://127.0.0.1:5173`; database `backend/data/revmarket.sqlite`. `BACKEND_DB` can override its path. In `BACKEND_ENV=staging`, `APP_ORIGIN`, `BACKEND_DB`, and `BACKEND_PORT` must be set explicitly; see [docs/STAGING.md](../docs/STAGING.md) (`npm run staging:drill`). Set `SUPER_ADMIN_WALLETS` to comma-separated Stellar G-addresses for the super-admin network panel; the backend verifies the wallet against a signed session. Set `PINATA_JWT` on the backend to enable public IPFS image pinning; never place it in a frontend `VITE_*` variable. Optional AI drafting assistance (`POST /api/drafts/:id/ai-assist`) is disabled by default (`AI_ENABLED=false`) so manual drafting and review work without AI credentials; when `AI_ENABLED=true` or any `AI_*` variable is set, `AI_ENDPOINT`, `AI_API_KEY`, and `AI_MODEL` are required and wired to `createApi`. Never set `RESOLVER_SECRET` in the backend API environment (it is rejected at startup to enforce API/worker separation). The Vite development proxy targets port 3001, so change its target when changing BACKEND_PORT.
 
 The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the listener and database. The launch command enables Node's experimental built-in SQLite API for Node 22 compatibility. SQLite may emit an experimental-feature warning. Keep the database directory writable and out of Git, ZIP deliveries and public hosting.
 
 ## Modules
 
-- `server.mjs`: environment, local listener and shutdown.
+- `server.mjs`: startup validation, environment wiring, local listener and graceful shutdown.
+- `config.mjs`: pre-listen environment validation (`BACKEND_ENV`, origins, ports, optional AI config and API/worker credential separation) and idempotent graceful shutdown coordinator.
 - `app.mjs`: version-1 HTTP routes, signed challenges, sessions, validation and limits.
 - `store.mjs`: SQLite schema version and persistence boundary. Add reviewed migrations when evolving the schema; newer databases are refused by older code.
 - `backup.mjs`: online `VACUUM INTO` backup, restore verification and guarded promotion; see [docs/BACKUP_RESTORE.md](../docs/BACKUP_RESTORE.md) (`npm run db:backup`, `db:restore-verify`, `db:drill`).
@@ -46,7 +47,10 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 | DELETE `/api/me` | Session + Origin | Delete own profile, activity, sessions and outstanding challenges; chain data remains |
 | GET `/api/admin/network` | Signed session + super-admin allowlist | Returns network availability; Mainnet remains unavailable until deployed and supported |
 | POST `/api/market-image` | Signed wallet session + matching `X-Stellar-Wallet` header | Accepts one JPEG, PNG, or WebP up to 5 MB; pins it to public IPFS and returns its CID |
-| PUT `/api/drafts/:id` | Owner session + Origin | Draft fields plus required `expectedRevisionId` (the current revision id); creates the next revision and resets `approved`/`changes_requested` to `draft`. A stale id returns 409 `{error,code:'revision_conflict',currentRevisionId,currentRevisionNumber}` and writes nothing |
+| PUT `/api/drafts/:id` | Owner session + Origin | Draft fields plus required `expectedRevisionId` (the current revision id); creates the next revision, resets `approved`/`changes_requested` to `draft` and invalidates pending publication intents. A stale id returns 409 `{error,code:'revision_conflict',currentRevisionId,currentRevisionNumber}` and writes nothing |
+| POST `/api/drafts/:id/publication-intents` | Signed creator session + Origin | Creates or reuses one active off-chain publication intent (`status: pending`) pinned to the approved revision, rules digest, reviewer, target network, expiry and exact deployment parameters |
+| GET `/api/drafts/:id/publication-intents` | Owner, active reviewer, or super-admin | Lists off-chain publication intents for the draft |
+| GET `/api/publication-intents/:id` | Owner, active reviewer, or super-admin | Reads one off-chain publication intent (`pending`, `invalidated`, or `expired`; `confirmedMarket: false`, `deployed: false`) |
 
 No user-list/admin, balance, betting, delegation-grant or automation-execution endpoint exists. The session is an off-chain identity convenience, not authority over escrow or wallet funds.
 
