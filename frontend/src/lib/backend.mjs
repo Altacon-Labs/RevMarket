@@ -90,3 +90,12 @@ export async function requestAiAssist(draftId) {
 export async function createDraft(draftData) {
   return await api('/drafts', {method: 'POST', body: draftData});
 }
+
+export async function createPublicationIntent(draftId, options = {}) {
+  return await api(`/drafts/${draftId}/publication-intents`, {method: 'POST', body: options});
+}
+
+export async function getPublicationIntent(intentId) {
+  return await api(`/publication-intents/${intentId}`);
+}
+

@@ -46,6 +46,9 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 | DELETE `/api/me` | Session + Origin | Delete own profile, activity, sessions and outstanding challenges; chain data remains |
 | GET `/api/admin/network` | Signed session + super-admin allowlist | Returns network availability; Mainnet remains unavailable until deployed and supported |
 | POST `/api/market-image` | Signed wallet session + matching `X-Stellar-Wallet` header | Accepts one JPEG, PNG, or WebP up to 5 MB; pins it to public IPFS and returns its CID |
+| POST `/api/drafts/:id/publication-intents` | Signed creator session + Origin | Creates or reuses one active off-chain publication intent (`status: pending`) pinned to the approved revision, rules digest, reviewer, target network, expiry and exact deployment parameters |
+| GET `/api/drafts/:id/publication-intents` | Owner, active reviewer, or super-admin | Lists off-chain publication intents for the draft |
+| GET `/api/publication-intents/:id` | Owner, active reviewer, or super-admin | Reads one off-chain publication intent (`pending`, `invalidated`, or `expired`; `confirmedMarket: false`, `deployed: false`) |
 
 No user-list/admin, balance, betting, delegation-grant or automation-execution endpoint exists. The session is an off-chain identity convenience, not authority over escrow or wallet funds.
 
