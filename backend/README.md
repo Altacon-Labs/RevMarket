@@ -29,6 +29,7 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 - `config.mjs`: pre-listen environment validation (`BACKEND_ENV`, origins, ports, optional AI config and API/worker credential separation) and idempotent graceful shutdown coordinator.
 - `app.mjs`: version-1 HTTP routes, signed challenges, sessions, validation and limits.
 - `store.mjs`: SQLite schema version and persistence boundary. Add reviewed migrations when evolving the schema; newer databases are refused by older code.
+- `verified-activity.mjs`: authenticated wallet read API over indexed `market_events`, keyset cursor pagination and checkpoint freshness/gap reporting.
 - `backup.mjs`: online `VACUUM INTO` backup, restore verification and guarded promotion; see [docs/BACKUP_RESTORE.md](../docs/BACKUP_RESTORE.md) (`npm run db:backup`, `db:restore-verify`, `db:drill`).
 - `frontend/src/lib/backend.mjs`: same-origin API and explicit Freighter message sign-in.
 - `frontend/src/BackendPanel.jsx`: optional profile/activity UI. Market transactions continue through the Stellar wallet even if this service is offline.
@@ -42,8 +43,9 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 | POST `/api/auth/verify` | Matching Origin | `{id,signature}`; SEP-53 base64 signature; HttpOnly session cookie |
 | GET `/api/me` | Session | Own public-key profile and creation/login timestamps |
 | POST `/api/logout` | Matching Origin | Revoke current session and clear cookie |
-| GET `/api/activity` | Session | Latest 50 own reported actions |
+| GET `/api/activity` | Session | Latest 50 own reported actions (`unverified_client_report`) |
 | POST `/api/activity` | Session + Origin | `{wallet,action,txHash}`; create/predict/request/claim only; deduplicated |
+| GET `/api/activity/verified` | Session | Paginated confirmed chain events (`confirmed_chain_event`) for the signed-in wallet with cursor and checkpoint freshness |
 | DELETE `/api/me` | Session + Origin | Delete own profile, activity, sessions and outstanding challenges; chain data remains |
 | GET `/api/admin/network` | Signed session + super-admin allowlist | Returns network availability; Mainnet remains unavailable until deployed and supported |
 | POST `/api/market-image` | Signed wallet session + matching `X-Stellar-Wallet` header | Accepts one JPEG, PNG, or WebP up to 5 MB; pins it to public IPFS and returns its CID |
@@ -81,5 +83,14 @@ Operational commands from the repository root:
 
 ```sh
 node --experimental-sqlite backend/ingest.mjs --fixture
+node --experimental-sqlite backend/verified-activity.mjs --fixture
 CONTRACT_ID=CACP6QFWWZ7BBMDXB5KHC6AAQKE3HBQ4MFFZNNAIJWYK7P6GXJAMLHIN npm run ingest
 ```
+
+### Verified wallet activity (`GET /api/activity/verified`)
+
+`GET /api/activity/verified` serves confirmed contract events attributable to the signed-in session wallet (`market_events.actor_wallet = sessionWallet`, covering `prediction` and `claim` events emitted with a user `Address`) separately from `GET /api/activity` and `POST /api/activity`:
+
+- Client-reported `/api/activity` rows remain `unverified_client_report` and are never upgraded or cross-linked based on a supplied `txHash`.
+- Results are ordered newest-first by `(ledger DESC, event_id DESC)` with an opaque base64url `cursor` (`?limit=1..100&cursor=...&eventType=...`) that stays stable across duplicate `ledger_closed_at` timestamps, concurrent ingestion of newer ledgers, and SQLite/process restarts.
+- Responses include `verificationSource` (`soroban_rpc_indexer`, `networkPassphrase`, `contractId`, `clientReportsIncluded: false`) and `freshness` (`status`, `complete`, `fresh`, `stale`, `lagging`, `lagReasons`, `hasGaps`, `gapCount`, `ageSeconds`, `staleAfterSeconds`, `ledgerLag`, and recorded `gaps`). Configure `CONTRACT_ID` and optional `INDEXER_STALE_AFTER_SECONDS` (default `120`) in the backend process environment.

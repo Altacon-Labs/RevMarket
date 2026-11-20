@@ -2,6 +2,7 @@ import {createServer} from 'node:http';
 import {createHash,randomBytes} from 'node:crypto';
 import {File} from 'node:buffer';
 import {Keypair,Networks,StrKey} from '@stellar/stellar-sdk';
+import {DEFAULT_STALE_AFTER_SECONDS,queryVerifiedWalletActivity,validateVerifiedActivityConfig} from './verified-activity.mjs';
 
 const cookieName='revmarket_session';
 const maxImageBytes=5*1024*1024;
@@ -206,11 +207,12 @@ function tokenOf(req){
   const value=(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
   return value && /^[a-f0-9]{64}$/.test(value)?value:null;
 }
-export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.floor(Date.now()/1000),rateLimit=120,superAdminWallets=[],pinataJwt='',uploadImage,reviewerWallets=[],aiConfig=null,getAiSuggestionsFn=null}){
+export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.floor(Date.now()/1000),rateLimit=120,superAdminWallets=[],pinataJwt='',uploadImage,reviewerWallets=[],aiConfig=null,getAiSuggestionsFn=null,contractId=undefined,staleAfterSeconds=DEFAULT_STALE_AFTER_SECONDS}){
   const origin=new URL(appOrigin);
   if(origin.origin!==appOrigin || origin.username || origin.password || !['http:','https:'].includes(origin.protocol))throw new Error('APP_ORIGIN must be an exact HTTP(S) origin');
   if(origin.protocol==='http:' && !['127.0.0.1','localhost','[::1]'].includes(origin.hostname))throw new Error('Non-local APP_ORIGIN requires HTTPS');
   if(!Array.isArray(superAdminWallets) || superAdminWallets.some(wallet=>!StrKey.isValidEd25519PublicKey(wallet)))throw new Error('SUPER_ADMIN_WALLETS must contain valid Stellar G-addresses');
+  const verifiedActivityConfig=validateVerifiedActivityConfig({contractId,staleAfterSeconds});
   const superAdmins=new Set(superAdminWallets);
   const buckets=new Map();
   const cookie=(value,seconds)=>`${cookieName}=${value}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=${seconds}${origin.protocol==='https:'?'; Secure':''}`;
@@ -298,6 +300,10 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
         db.prepare('INSERT OR IGNORE INTO activity(wallet,action,tx_hash,created_at) VALUES(?,?,?,?)').run(wallet,body.action,body.txHash,time);
         db.prepare('DELETE FROM activity WHERE wallet=? AND id NOT IN(SELECT id FROM activity WHERE wallet=? ORDER BY id DESC LIMIT 1000)').run(wallet,wallet);
         return send(200,{recorded:true,verification:'unverified_client_report'});
+      }
+      if(route==='GET /api/activity/verified'){
+        const wallet=session(req);
+        return send(200,queryVerifiedWalletActivity({db,wallet,searchParams:url.searchParams,now:time,contractId:verifiedActivityConfig.contractId,networkPassphrase:verifiedActivityConfig.networkPassphrase,staleAfterSeconds:verifiedActivityConfig.staleAfterSeconds}));
       }
       // --- Reviewer role management (super-admin only) ---
       if(route==='GET /api/admin/reviewers'){
