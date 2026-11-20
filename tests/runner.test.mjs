@@ -8,6 +8,7 @@ import {createAttemptStore} from '../service/attempts.mjs';
 import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {pollDueMarkets} from '../service/scheduler.mjs';
 function fixture(kind=['Price','ETH',100n]) {
   const m={status:0,closes_at:200n,deadline:86600n,kind,question:'Question'};const writes=[],saved=[];
   return {m,writes,saved,options:{id:4,source:'test',sign:()=>{},now:()=>205,
@@ -60,5 +61,36 @@ test('prepared attempts recover before submission and failed or expired attempts
     assert.equal(await processMarket(f.options),'pending');assert.equal(submitted,1);
     state='failed';assert.equal(await processMarket(f.options),'failed');
     assert.equal(store.get(Networks.TESTNET,'test-contract',4).status,'failed');
+  } finally {store.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('retry scheduling uses deterministic bounded backoff and preserves due times across restart',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'revmarket-jobs-'));const path=join(dir,'attempts.sqlite');
+  let store=createAttemptStore(path);let now=100;const ran=[];
+  try {
+    const due=await pollDueMarkets({store,network:'testnet',contract:'c',count:2,now:()=>now,batchSize:2,
+      process:async id=>{ran.push(id);if(id===0)throw Error('provider down');return 'settled';}});
+    assert.deepEqual(due,[0,1]);assert.deepEqual(ran,[0,1]);
+    assert.equal(store.getJob('testnet','c',0).next_attempt_at,105);
+    store.close();store=createAttemptStore(path);
+    now=104;
+    assert.deepEqual(await pollDueMarkets({store,network:'testnet',contract:'c',count:2,now:()=>now,batchSize:2,process:async()=>{throw Error('not due');}}),[]);
+    now=105;const retried=[];
+    assert.deepEqual(await pollDueMarkets({store,network:'testnet',contract:'c',count:2,now:()=>now,batchSize:2,
+      process:async id=>{retried.push(id);return 'settled';}}),[0]);
+    assert.deepEqual(retried,[0]);
+  } finally {store.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('retry backoff is capped and jobs expire at their stored deadline',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'revmarket-jobs-'));const store=createAttemptStore(join(dir,'attempts.sqlite'));
+  try {
+    store.ensureJob('testnet','c',8,10);store.setWindow('testnet','c',8,{closesAt:10,deadline:1000,now:10});
+    let now=10;
+    for(let i=0;i<7;i++){const next=store.defer('testnet','c',8,{now});assert.ok(next-now<=300);now=next;}
+    assert.equal(now,625);
+    store.ensureJob('testnet','c',9,20);store.setWindow('testnet','c',9,{closesAt:20,deadline:25,now:20});
+    assert.equal(store.defer('testnet','c',9,{now:21}),null);
+    assert.equal(store.getJob('testnet','c',9).state,'expired');
   } finally {store.close();rmSync(dir,{recursive:true,force:true});}
 });
