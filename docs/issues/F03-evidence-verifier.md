@@ -1,6 +1,6 @@
 # Verify a locally selected evidence JSON against a market's on-chain digest
 
-**Status:** unassigned draft; not enrolled in Wave. **Suggested complexity:** Medium / 150 points, subject to review. **Estimated scope:** 2–3 days. **Area:** frontend/security UX. **Reviewer:** repository owner must identify the active reviewer when publishing.
+**Status:** unassigned draft; not enrolled in Wave. Linked issue: [Feature] Let participants verify settlement evidence from a local file. Implementation requires official assignment through Drips before a PR is accepted. Reviewer feedback: the local syntax check reported unclosed JSX tags and an unterminated string literal in `frontend/src/components/MarketDetailPage.jsx` (TS17008 at lines 226, 248, 249; TS1002/TS1005 at line 292). Those errors must be fixed in that component file before the PR is pushed; this draft document does not contain the affected code. **Suggested complexity:** Medium / 150 points, subject to review. **Estimated scope:** 2–3 days. **Area:** frontend/security UX. **Reviewer:** repository owner must identify the active reviewer when publishing.
 
 ## Problem
 
@@ -27,4 +27,4 @@ No evidence hosting, backend upload endpoint, IPFS pinning, arbitrary remote fet
 
 ## Validation
 
-Run the existing JavaScript suite and frontend build, plus the new integrity/binding/size cases. Exercise the file picker in a browser. No production funds, private keys or paid services are required.
+Run the existing JavaScript suite and frontend build, plus the new integrity/binding/size cases. Exercise the file picker in a browser. PR evidence must include fixture tests, desktop and mobile screenshots, and results from `npm test`, `npm run build`, and `npm run check:icons`. No production funds, private keys or paid services are required.

@@ -1,0 +1,66 @@
+# Testnet staging recipe with strict API/worker process and credential separation,
+# persistent SQLite and settlement evidence volumes, host readiness probe, and graceful shutdown.
+# Production hosting and Mainnet activation are intentionally excluded.
+services:
+  api:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    command: ["node", "--experimental-sqlite", "backend/server.mjs"]
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-3001}:3001"
+    environment:
+      BACKEND_ENV: staging
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: "3001"
+      APP_ORIGIN: ${APP_ORIGIN:?APP_ORIGIN is required}
+      BACKEND_DB: /var/lib/revmarket/db/revmarket.sqlite
+      BACKEND_SHUTDOWN_TIMEOUT_MS: ${BACKEND_SHUTDOWN_TIMEOUT_MS:-5000}
+      SUPER_ADMIN_WALLETS: ${SUPER_ADMIN_WALLETS:-}
+      PINATA_JWT: ${PINATA_JWT:-}
+      AI_ENABLED: ${AI_ENABLED:-false}
+      AI_ENDPOINT: ${AI_ENDPOINT:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+    volumes:
+      - ../../:/app:ro
+      - revmarket_staging_db:/var/lib/revmarket/db
+      - revmarket_staging_backups:/var/lib/revmarket/backups
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    command: ["node", "--experimental-sqlite", "service/worker.mjs"]
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    environment:
+      CONTRACT_ID: ${CONTRACT_ID:?CONTRACT_ID is required}
+      RESOLVER_SECRET: ${RESOLVER_SECRET:?RESOLVER_SECRET is required}
+      STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      EVENT_SOURCE_URLS: ${EVENT_SOURCE_URLS:-[]}
+      RUN_ONCE: ${RUN_ONCE:-0}
+    volumes:
+      - ../../:/app:ro
+      - revmarket_staging_evidence:/app/service/evidence
+      - revmarket_staging_worker_state:/var/lib/revmarket/worker
+
+volumes:
+  revmarket_staging_db:
+  revmarket_staging_backups:
+  revmarket_staging_evidence:
+  revmarket_staging_worker_state:

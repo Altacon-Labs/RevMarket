@@ -4,7 +4,7 @@ export function openStore(filename) {
   const db=new DatabaseSync(filename);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
   const version=db.prepare('PRAGMA user_version').get().user_version;
-  if(version>3){db.close();throw new Error('Database schema is newer than this backend');}
+  if(version>4){db.close();throw new Error('Database schema is newer than this backend');}
   if(version===0) db.exec(`
     BEGIN;
     CREATE TABLE users(wallet TEXT PRIMARY KEY, created_at INTEGER NOT NULL, last_login INTEGER NOT NULL);
@@ -139,6 +139,32 @@ export function openStore(filename) {
     );
     CREATE INDEX ingestion_gaps_scope ON ingestion_gaps(network_passphrase, contract_id, id DESC);
     PRAGMA user_version=3;
+    COMMIT;
+  `);
+  if(db.prepare('PRAGMA user_version').get().user_version===3) db.exec(`
+    BEGIN;
+    CREATE TABLE publication_intents(
+      id INTEGER PRIMARY KEY,
+      draft_id INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+      revision_id INTEGER NOT NULL REFERENCES draft_revisions(id) ON DELETE CASCADE,
+      review_decision_id INTEGER NOT NULL REFERENCES review_decisions(id) ON DELETE CASCADE,
+      creator_wallet TEXT NOT NULL,
+      reviewer_wallet TEXT NOT NULL,
+      target_network TEXT NOT NULL,
+      network_passphrase TEXT NOT NULL,
+      rules_digest TEXT NOT NULL,
+      params_hash TEXT NOT NULL,
+      params_json TEXT NOT NULL,
+      approval_expiry INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','invalidated','expired')),
+      invalidated_reason TEXT,
+      invalidated_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX publication_intents_active_revision ON publication_intents(revision_id) WHERE status='pending';
+    CREATE INDEX publication_intents_draft ON publication_intents(draft_id, id DESC);
+    PRAGMA user_version=4;
     COMMIT;
   `);
   return db;
