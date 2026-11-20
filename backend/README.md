@@ -63,3 +63,18 @@ There is a basic process-local IP rate limit, 8 KiB JSON bodies, parameterized S
 Future expansion is deliberately left in [TODO.md](TODO.md): verified history/indexing, account-auth review if needed, and on-chain permissions before any separate executor. A backend profile or message signature is never automation consent. Existing outcome resolution remains in `service/worker.mjs` with its separate resolver key. No new backend contribution issue is nominated by this foundation.
 
 Run `npm test` for HTTP/SQLite integration checks. Tests cover signature tampering/replay, expiry, origins, identity isolation, deduplication, deletion/logout, body limits, rate limits and database reopening. Real interactive Freighter signing remains a manual acceptance step; automated tests use ephemeral keypairs only.
+
+## Confirmed market event indexing
+
+`indexer.mjs` and `ingest.mjs` provide a read-only Stellar Testnet ingestor scoped to one configured legacy market contract (`CONTRACT_ID`, defaulting in CLI drills to the documented Testnet deployment). Client-submitted `/api/activity` rows remain separate and `unverified_client_report`.
+
+- Normalized contract topics (`contracts/market/src/lib.rs`): `created` (`create`), `predict` (`prediction`), `settled` (`settlement`), and `claimed` (`claim`). Exact 128-bit integer strings and case-sensitive Stellar addresses are preserved.
+- Atomic persistence (`store.mjs` schema v3): each RPC page commits `market_events` (`UNIQUE(network_passphrase, contract_id, event_id)`) and `ingestion_checkpoints` in one `BEGIN IMMEDIATE` transaction so replayed pages, interrupted writes, and restarts neither duplicate rows nor skip events.
+- Gap reporting: expired cursors, pruned `startLedger` windows, and RPC unavailability record explicit entries in `ingestion_gaps` and mark the checkpoint `complete: false` instead of claiming full history.
+
+Operational commands from the repository root:
+
+```sh
+node --experimental-sqlite backend/ingest.mjs --fixture
+CONTRACT_ID=CACP6QFWWZ7BBMDXB5KHC6AAQKE3HBQ4MFFZNNAIJWYK7P6GXJAMLHIN npm run ingest
+```
