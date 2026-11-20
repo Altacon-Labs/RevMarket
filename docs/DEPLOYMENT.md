@@ -124,7 +124,7 @@ Operational requirements:
 - run one process per resolver account
 - parallel workers can collide on account sequence numbers
 - the worker scans at most 1,000 markets
-- it requests closed markets, gathers evidence, writes exact JSON under `service/evidence/<sha256>.json`, and submits settlement
+- it requests closed markets, gathers evidence, writes exact JSON under `service/evidence/<sha256>.json`, and submits settlement; to share a stored file byte for byte, use `npm run evidence:export` ([EVIDENCE_EXPORT.md](EVIDENCE_EXPORT.md))
 - it checks state before sending and again on each rescan
 - failed or inconclusive sources defer resolution rather than guessing
 - use a dedicated scheduler or indexer before increasing volume
