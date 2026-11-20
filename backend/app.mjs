@@ -1,15 +1,134 @@
 import {createServer} from 'node:http';
 import {createHash,randomBytes} from 'node:crypto';
 import {File} from 'node:buffer';
-import {Keypair,StrKey} from '@stellar/stellar-sdk';
+import {Keypair,Networks,StrKey} from '@stellar/stellar-sdk';
 
 const cookieName='revmarket_session';
 const maxImageBytes=5*1024*1024;
 const cidPattern=/^bafy[a-z2-7]{20,}$/;
+const targetNetwork='testnet';
+const targetNetworkPassphrase=Networks.TESTNET;
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const contentHash=obj=>createHash('sha256').update(JSON.stringify(obj,Object.keys(obj).sort())).digest('hex');
+const canonicalJson=value=>{
+  if(value===null || typeof value!=='object')return JSON.stringify(value);
+  if(Array.isArray(value))return `[${value.map(item=>canonicalJson(item===undefined?null:item)).join(',')}]`;
+  const keys=Object.keys(value).filter(key=>value[key]!==undefined).sort();
+  return `{${keys.map(key=>`${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+};
+const canonicalHash=value=>hash(canonicalJson(value));
+function buildIntentParams(revision){
+  let sources=[];
+  try{
+    const parsed=JSON.parse(revision.sources_json||'[]');
+    if(Array.isArray(parsed))sources=parsed;
+  }catch{sources=[];}
+  return {
+    schema:'revmarket.publication-intent.v1',
+    network:targetNetwork,
+    networkPassphrase:targetNetworkPassphrase,
+    question:revision.question,
+    category:revision.category||'',
+    tradingClose:revision.trading_close,
+    observationTime:revision.observation_time??null,
+    resolutionDeadline:revision.resolution_deadline??null,
+    yesRule:revision.yes_rule||'',
+    noRule:revision.no_rule||'',
+    equalityRule:revision.equality_rule||'',
+    sources,
+    fallbackRule:revision.fallback_rule||'',
+    unavailableDataRule:revision.unavailable_data_rule||'',
+    collateral:revision.collateral||'native',
+    feeBps:revision.fee_bps??0,
+    resolver:revision.resolver||'',
+    policyVersion:revision.policy_version||'',
+    implementationVersion:revision.implementation_version||'',
+  };
+}
+function formatPublicationIntent(row){
+  return {
+    id:row.id,
+    draftId:row.draft_id,
+    revisionId:row.revision_id,
+    revisionNumber:row.revision_number,
+    reviewDecisionId:row.review_decision_id,
+    creatorWallet:row.creator_wallet,
+    reviewerWallet:row.reviewer_wallet,
+    targetNetwork:row.target_network,
+    networkPassphrase:row.network_passphrase,
+    rulesDigest:row.rules_digest,
+    paramsHash:row.params_hash,
+    parameters:JSON.parse(row.params_json),
+    approvalExpiry:row.approval_expiry,
+    status:row.status,
+    invalidatedReason:row.invalidated_reason||null,
+    invalidatedAt:row.invalidated_at||null,
+    createdAt:row.created_at,
+    updatedAt:row.updated_at,
+    authority:'off_chain_publication_intent',
+    confirmedMarket:false,
+    deployed:false,
+    contractAddress:null,
+    txHash:null,
+  };
+}
+function reconcileIntentState(db,intentId,time){
+  const row=db.prepare(`
+    SELECT pi.*, r.revision_number, d.status AS draft_status, d.current_revision_id, rv.revoked_at AS reviewer_revoked_at
+    FROM publication_intents pi
+    JOIN drafts d ON d.id=pi.draft_id
+    JOIN draft_revisions r ON r.id=pi.revision_id
+    LEFT JOIN reviewers rv ON rv.wallet=pi.reviewer_wallet
+    WHERE pi.id=?
+  `).get(intentId);
+  if(!row)return null;
+  if(row.status==='pending'){
+    let nextStatus=null,reason=null,changedAt=time;
+    if(row.reviewer_revoked_at!==null && row.reviewer_revoked_at!==undefined){
+      nextStatus='invalidated';
+      reason='reviewer_revoked';
+      changedAt=row.reviewer_revoked_at;
+    }else if(row.current_revision_id!==row.revision_id){
+      nextStatus='invalidated';
+      reason='draft_revised';
+    }else if(row.draft_status!=='approved'){
+      nextStatus='invalidated';
+      reason='draft_withdrawn';
+    }else if(row.approval_expiry<=time){
+      nextStatus='expired';
+      reason='approval_expired';
+    }
+    if(nextStatus){
+      db.prepare('UPDATE publication_intents SET status=?,invalidated_reason=?,invalidated_at=?,updated_at=? WHERE id=?').run(nextStatus,reason,changedAt,time,row.id);
+      row.status=nextStatus;
+      row.invalidated_reason=reason;
+      row.invalidated_at=changedAt;
+      row.updated_at=time;
+    }
+  }
+  return formatPublicationIntent(row);
+}
+function assertMatchingIntentRequest(body,revision,params){
+  if(body.revisionId!==undefined && body.revisionId!==revision.id)throw new ApiError(409,'Requested revision does not match the current approved revision');
+  if(body.targetNetwork!==undefined && body.targetNetwork!==targetNetwork)throw new ApiError(409,'Different target network requires a fresh approval');
+  const directKeys=['question','category','tradingClose','observationTime','resolutionDeadline','yesRule','noRule','equalityRule','sources','fallbackRule','unavailableDataRule','collateral','feeBps','resolver','policyVersion','implementationVersion'];
+  for(const key of directKeys){
+    if(body[key]!==undefined && canonicalJson(body[key])!==canonicalJson(params[key])){
+      throw new ApiError(409,'Parameter set differs from approved revision; edit the draft and obtain a fresh approval');
+    }
+  }
+  if(body.parameters!==undefined){
+    if(!body.parameters || typeof body.parameters!=='object' || Array.isArray(body.parameters))throw new ApiError(400,'Parameters must be an object');
+    for(const [key,val] of Object.entries(body.parameters)){
+      if(!Object.prototype.hasOwnProperty.call(params,key) || canonicalJson(val)!==canonicalJson(params[key])){
+        throw new ApiError(409,'Parameter set differs from approved revision; edit the draft and obtain a fresh approval');
+      }
+    }
+  }
+}
 const draftFields=['question','category','tradingClose','observationTime','resolutionDeadline','yesRule','noRule','equalityRule','sources','fallbackRule','unavailableDataRule','collateral','feeBps','resolver','policyVersion','implementationVersion','metadata','origin'];
 const draftRevisionFields=['question','category','metadata_json','trading_close','observation_time','resolution_deadline','yes_rule','no_rule','equality_rule','sources_json','fallback_rule','unavailable_data_rule','collateral','fee_bps','resolver','policy_version','implementation_version'];
+const intentOverrideFields=['revisionId','targetNetwork','question','category','tradingClose','observationTime','resolutionDeadline','yesRule','noRule','equalityRule','sources','fallbackRule','unavailableDataRule','collateral','feeBps','resolver','policyVersion','implementationVersion','parameters'];
 function validateDraftBody(body){
   if(typeof body.question!=='string'||body.question.length===0||body.question.length>512)throw new ApiError(400,'Question must be 1–512 characters');
   if(typeof body.tradingClose!=='number'||!Number.isSafeInteger(body.tradingClose)||body.tradingClose<=0)throw new ApiError(400,'Valid trading close timestamp required');
@@ -202,10 +321,15 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
         }else{
           const existing=db.prepare('SELECT revoked_at FROM reviewers WHERE wallet=?').get(body.wallet);
           if(!existing||existing.revoked_at!==null)throw new ApiError(404,'Reviewer not found or already revoked');
-          db.prepare('UPDATE reviewers SET revoked_at=? WHERE wallet=?').run(time,body.wallet);
-          // Invalidate any pending approvals by this reviewer
-          db.prepare("UPDATE drafts SET status='draft',updated_at=? WHERE status='approved' AND id IN (SELECT draft_id FROM review_decisions WHERE reviewer_wallet=? AND decision='approved')").run(time,body.wallet);
-          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(NULL,?,?,?,?)').run(wallet,'reviewer_revoked',JSON.stringify({reviewer:body.wallet}),time);
+          db.exec('BEGIN IMMEDIATE');
+          try{
+            db.prepare('UPDATE reviewers SET revoked_at=? WHERE wallet=?').run(time,body.wallet);
+            // Invalidate any pending approvals by this reviewer
+            db.prepare("UPDATE drafts SET status='draft',updated_at=? WHERE status='approved' AND id IN (SELECT draft_id FROM review_decisions WHERE reviewer_wallet=? AND decision='approved')").run(time,body.wallet);
+            db.prepare("UPDATE publication_intents SET status='invalidated',invalidated_reason='reviewer_revoked',invalidated_at=?,updated_at=? WHERE reviewer_wallet=? AND status='pending'").run(time,time,body.wallet);
+            db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(NULL,?,?,?,?)').run(wallet,'reviewer_revoked',JSON.stringify({reviewer:body.wallet}),time);
+            db.exec('COMMIT');
+          }catch(e){db.exec('ROLLBACK');throw e;}
         }
         return send(200,{updated:true});
       }
@@ -270,6 +394,7 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
             // Editing an approved draft resets to draft and invalidates approval
             const newStatus=draft.status==='approved'?'draft':draft.status==='changes_requested'?'draft':draft.status;
             db.prepare('UPDATE drafts SET current_revision_id=?,status=?,updated_at=? WHERE id=?').run(revId,newStatus,time,draftId);
+            db.prepare("UPDATE publication_intents SET status='invalidated',invalidated_reason='draft_revised',invalidated_at=?,updated_at=? WHERE draft_id=? AND status='pending'").run(time,time,draftId);
             db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'revised',JSON.stringify({revisionId:revId,revisionNumber:maxRev+1,previousStatus:draft.status}),time);
             db.exec('COMMIT');
             return send(200,{revisionId:revId,revisionNumber:maxRev+1,contentHash:ch,status:newStatus});
@@ -293,8 +418,13 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
           if(!draft)throw new ApiError(404,'Draft not found');
           if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can withdraw a draft');
           if(!['submitted','approved'].includes(draft.status))throw new ApiError(409,`Cannot withdraw a draft in status: ${draft.status}`);
-          db.prepare("UPDATE drafts SET status='draft',updated_at=? WHERE id=?").run(time,draftId);
-          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'withdrawn',JSON.stringify({previousStatus:draft.status}),time);
+          db.exec('BEGIN IMMEDIATE');
+          try{
+            db.prepare("UPDATE drafts SET status='draft',updated_at=? WHERE id=?").run(time,draftId);
+            db.prepare("UPDATE publication_intents SET status='invalidated',invalidated_reason='draft_withdrawn',invalidated_at=?,updated_at=? WHERE draft_id=? AND status='pending'").run(time,time,draftId);
+            db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'withdrawn',JSON.stringify({previousStatus:draft.status}),time);
+            db.exec('COMMIT');
+          }catch(e){db.exec('ROLLBACK');throw e;}
           return send(200,{status:'draft'});
         }
         // POST /api/drafts/:id/review — reviewer decision
@@ -345,6 +475,96 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
           // Mark draft origin as ai_assisted if it was manual
           if(draft.origin==='manual')db.prepare("UPDATE drafts SET origin='ai_assisted',updated_at=? WHERE id=?").run(time,draftId);
           return send(200,{suggestions});
+        }
+        // POST /api/drafts/:id/publication-intents — create or reuse active publication intent for approved revision
+        if(req.method==='POST'&&subPath==='publication-intents'){
+          const wallet=session(req);
+          const body=await bodyOf(req);object(body,intentOverrideFields);
+          const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+          if(!draft)throw new ApiError(404,'Draft not found');
+          if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can create a publication intent');
+          db.exec('BEGIN IMMEDIATE');
+          try{
+            const existingIds=db.prepare('SELECT id FROM publication_intents WHERE draft_id=? ORDER BY id DESC').all(draftId);
+            for(const row of existingIds)reconcileIntentState(db,row.id,time);
+            const currentDraft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+            if(currentDraft.status!=='approved'){
+              throw new ApiError(409,`Cannot create publication intent for draft in status: ${currentDraft.status}`);
+            }
+            const revision=db.prepare('SELECT * FROM draft_revisions WHERE id=?').get(currentDraft.current_revision_id);
+            if(!revision)throw new ApiError(404,'Approved revision not found');
+            const approval=db.prepare('SELECT * FROM review_decisions WHERE draft_id=? ORDER BY id DESC LIMIT 1').get(draftId);
+            if(!approval || approval.decision!=='approved' || approval.revision_id!==revision.id){
+              throw new ApiError(409,'No active approval for the current draft revision');
+            }
+            if(!approval.approved_params_hash || approval.approved_params_hash!==revision.content_hash){
+              throw new ApiError(409,'Approved parameters digest does not match current revision');
+            }
+            const activeReviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(approval.reviewer_wallet);
+            if(!activeReviewer){
+              throw new ApiError(409,'Reviewer approval has been revoked');
+            }
+            if(typeof approval.expiry!=='number' || approval.expiry<=time){
+              throw new ApiError(409,'Approval has expired');
+            }
+            const params=buildIntentParams(revision);
+            assertMatchingIntentRequest(body,revision,params);
+            const existingActive=db.prepare("SELECT id FROM publication_intents WHERE revision_id=? AND status='pending'").get(revision.id);
+            if(existingActive){
+              const reconciled=reconcileIntentState(db,existingActive.id,time);
+              if(reconciled && reconciled.status==='pending'){
+                db.exec('COMMIT');
+                return send(200,{intent:reconciled,reused:true});
+              }
+            }
+            const paramsJson=canonicalJson(params);
+            const paramsDigest=hash(paramsJson);
+            const rulesDigest=revision.content_hash;
+            const insert=db.prepare(`
+              INSERT INTO publication_intents(
+                draft_id,revision_id,review_decision_id,creator_wallet,reviewer_wallet,
+                target_network,network_passphrase,rules_digest,params_hash,params_json,
+                approval_expiry,status,created_at,updated_at
+              ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)
+            `).run(
+              draftId,revision.id,approval.id,wallet,approval.reviewer_wallet,
+              targetNetwork,targetNetworkPassphrase,rulesDigest,paramsDigest,paramsJson,
+              approval.expiry,time,time
+            );
+            const intentId=Number(insert.lastInsertRowid);
+            db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(
+              draftId,wallet,'publication_intent_created',
+              JSON.stringify({intentId,revisionId:revision.id,reviewDecisionId:approval.id,rulesDigest,paramsHash:paramsDigest,targetNetwork,approvalExpiry:approval.expiry}),
+              time
+            );
+            const createdIntent=reconcileIntentState(db,intentId,time);
+            db.exec('COMMIT');
+            return send(201,{intent:createdIntent,reused:false});
+          }catch(e){db.exec('ROLLBACK');throw e;}
+        }
+        // GET /api/drafts/:id/publication-intents — list publication intents for a draft
+        if(req.method==='GET'&&subPath==='publication-intents'){
+          const wallet=session(req);
+          const draft=db.prepare('SELECT id,owner_wallet AS ownerWallet FROM drafts WHERE id=?').get(draftId);
+          if(!draft)throw new ApiError(404,'Draft not found');
+          const reviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
+          if(draft.ownerWallet!==wallet&&!reviewer&&!superAdmins.has(wallet))throw new ApiError(403,'Access denied');
+          const rows=db.prepare('SELECT id FROM publication_intents WHERE draft_id=? ORDER BY id DESC').all(draftId);
+          const intents=rows.map(r=>reconcileIntentState(db,r.id,time)).filter(Boolean);
+          return send(200,{intents});
+        }
+      }
+      if(url.pathname.startsWith('/api/publication-intents/')&&req.method==='GET'){
+        const parts=url.pathname.split('/');
+        if(parts.length===4){
+          const intentId=Number(parts[3]);
+          if(!Number.isSafeInteger(intentId)||intentId<=0)throw new ApiError(400,'Invalid publication intent ID');
+          const wallet=session(req);
+          const intent=reconcileIntentState(db,intentId,time);
+          if(!intent)throw new ApiError(404,'Publication intent not found');
+          const reviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
+          if(intent.creatorWallet!==wallet&&!reviewer&&!superAdmins.has(wallet))throw new ApiError(403,'Access denied');
+          return send(200,{intent});
         }
       }
       // GET /api/review-queue — list submitted drafts (reviewer or super-admin only)
