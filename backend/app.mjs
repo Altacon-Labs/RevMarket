@@ -3,6 +3,16 @@ import {createHash,randomBytes} from 'node:crypto';
 import {File} from 'node:buffer';
 import {Keypair,Networks,StrKey} from '@stellar/stellar-sdk';
 import {DEFAULT_STALE_AFTER_SECONDS,queryVerifiedWalletActivity,validateVerifiedActivityConfig} from './verified-activity.mjs';
+import {
+  DEFAULT_AI_RATE_LIMIT,
+  DEFAULT_AUTH_RATE_LIMIT,
+  DEFAULT_DRAFT_RATE_LIMIT,
+  DEFAULT_GENERAL_RATE_LIMIT,
+  DEFAULT_MAX_RATE_LIMIT_BUCKETS,
+  DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+  RateLimitError,
+  createScopedRateLimiter,
+} from './limiter.mjs';
 
 const cookieName='revmarket_session';
 const maxImageBytes=5*1024*1024;
@@ -207,35 +217,67 @@ function tokenOf(req){
   const value=(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
   return value && /^[a-f0-9]{64}$/.test(value)?value:null;
 }
-export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.floor(Date.now()/1000),rateLimit=120,superAdminWallets=[],pinataJwt='',uploadImage,reviewerWallets=[],aiConfig=null,getAiSuggestionsFn=null,contractId=undefined,staleAfterSeconds=DEFAULT_STALE_AFTER_SECONDS}){
+export function createApi(options={}){
+  const {
+    db,
+    appOrigin='http://127.0.0.1:5173',
+    now=()=>Math.floor(Date.now()/1000),
+    rateLimit=DEFAULT_GENERAL_RATE_LIMIT,
+    authRateLimit=options.rateLimit!==undefined?rateLimit:DEFAULT_AUTH_RATE_LIMIT,
+    draftRateLimit=options.rateLimit!==undefined?rateLimit:DEFAULT_DRAFT_RATE_LIMIT,
+    aiRateLimit=DEFAULT_AI_RATE_LIMIT,
+    rateLimitWindowSeconds=DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+    maxRateLimitBuckets=DEFAULT_MAX_RATE_LIMIT_BUCKETS,
+    trustedProxies=[],
+    superAdminWallets=[],
+    pinataJwt='',
+    uploadImage,
+    reviewerWallets=[],
+    aiConfig=null,
+    getAiSuggestionsFn=null,
+    contractId=undefined,
+    staleAfterSeconds=DEFAULT_STALE_AFTER_SECONDS,
+  }=options;
   const origin=new URL(appOrigin);
   if(origin.origin!==appOrigin || origin.username || origin.password || !['http:','https:'].includes(origin.protocol))throw new Error('APP_ORIGIN must be an exact HTTP(S) origin');
   if(origin.protocol==='http:' && !['127.0.0.1','localhost','[::1]'].includes(origin.hostname))throw new Error('Non-local APP_ORIGIN requires HTTPS');
   if(!Array.isArray(superAdminWallets) || superAdminWallets.some(wallet=>!StrKey.isValidEd25519PublicKey(wallet)))throw new Error('SUPER_ADMIN_WALLETS must contain valid Stellar G-addresses');
   const verifiedActivityConfig=validateVerifiedActivityConfig({contractId,staleAfterSeconds});
   const superAdmins=new Set(superAdminWallets);
-  const buckets=new Map();
+  const rateLimiter=createScopedRateLimiter({
+    rateLimit,
+    authRateLimit,
+    draftRateLimit,
+    aiRateLimit,
+    windowSeconds:rateLimitWindowSeconds,
+    maxBuckets:maxRateLimitBuckets,
+    trustedProxies,
+  });
   const cookie=(value,seconds)=>`${cookieName}=${value}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=${seconds}${origin.protocol==='https:'?'; Secure':''}`;
   const cleanup=()=>{db.prepare('DELETE FROM challenges WHERE expires_at<=?').run(now());db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(now());};
-  const session=req=>{
+  const peekSessionWallet=req=>{
     const token=tokenOf(req);
     const row=token && db.prepare('SELECT wallet FROM sessions WHERE token_hash=? AND expires_at>?').get(hash(token),now());
-    if(!row)throw new ApiError(401,'Sign in to activity tracking');
-    return row.wallet;
+    return row?row.wallet:null;
+  };
+  const session=req=>{
+    const wallet=peekSessionWallet(req);
+    if(!wallet)throw new ApiError(401,'Sign in to activity tracking');
+    return wallet;
   };
   const server=createServer(async(req,res)=>{
+    let rateHeaders={};
     const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'",'Referrer-Policy':'no-referrer'};
-    const send=(status,data,extra={})=>{res.writeHead(status,{...headers,...extra});res.end(JSON.stringify(data));};
+    const send=(status,data,extra={})=>{res.writeHead(status,{...headers,...rateHeaders,...extra});res.end(JSON.stringify(data));};
     try{
       if(req.headers.origin && req.headers.origin!==appOrigin)throw new ApiError(403,'Origin not allowed');
       if(!['GET','HEAD'].includes(req.method) && req.headers.origin!==appOrigin)throw new ApiError(403,'Matching Origin header required');
-      const time=now(),ip=req.socket.remoteAddress;
-      for(const [key,b] of buckets)if(time-b.start>=60)buckets.delete(key);
-      if(!buckets.has(ip)){if(buckets.size>=1000)throw new ApiError(503,'Try later');buckets.set(ip,{start:time,count:0});}
-      if(++buckets.get(ip).count>rateLimit)throw new ApiError(429,'Too many requests');
-      cleanup();
+      const time=now();
       const url=new URL(req.url,'http://localhost');
       const route=req.method+' '+url.pathname;
+      const limitDecision=rateLimiter.checkRequest({req,method:req.method,pathname:url.pathname,resolveWallet:peekSessionWallet,time});
+      rateHeaders=limitDecision.headers;
+      cleanup();
       if(route==='GET /api/health'){
         db.prepare('SELECT 1').get();
         return send(200,{status:'ok',service:'revmarket-api',version:1,network:'testnet',automationEnabled:false});
@@ -601,10 +643,14 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
       throw new ApiError(404,'Endpoint not found');
     }catch(e){
       // Never echo bodies, cookies, signatures or internal database errors.
-      if(!res.headersSent)send(e.status||500,e.status?{error:e.message,...e.extra}:{error:'Internal server error'},e.status===413?{'Connection':'close'}:{});
+      if(!res.headersSent){
+        if(e instanceof RateLimitError)send(e.status,e.toBody(),e.toHeaders());
+        else send(e.status||500,e.status?{error:e.message,...e.extra}:{error:'Internal server error'},e.status===413?{'Connection':'close'}:{});
+      }
       else res.end();
     }
   });
+  server.rateLimiter=rateLimiter;
   server.requestTimeout=15_000;server.headersTimeout=10_000;server.keepAliveTimeout=5000;
   return server;
 }
