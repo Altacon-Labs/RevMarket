@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { createClient } from '../shared/stellar.mjs';
 import { processMarket } from './runner.mjs';
 import { createAttemptStore } from './attempts.mjs';
+import { pollDueMarkets } from './scheduler.mjs';
 import { priceObservations, eventObservations } from './providers.mjs';
 
 const env = process.env;
@@ -27,10 +28,9 @@ do {
   try {
     const count = await client.read(source,'count');
     if (count > 1000) throw new Error('Scan limit exceeded; deploy an indexer before scaling');
-    for (let id=0; id<count; id++) {
-      try { const result=await processMarket({client,source,sign,id,providers,saveEvidence,attemptStore}); if(result==='settled') console.log(`Market ${id} settled`); }
-      catch { console.error(`Market ${id}: resolution deferred; inspect providers and on-chain status`); }
-    }
+    await pollDueMarkets({store:attemptStore,network:'testnet',contract:env.CONTRACT_ID,count,batchSize:Number(env.SETTLEMENT_BATCH_SIZE || 25),
+      process:(id,onMarketRead)=>processMarket({client,source,sign,id,providers,saveEvidence,attemptStore,onMarketRead}),
+      onError:id=>console.error(`Market ${id}: resolution deferred; inspect providers and on-chain status`)});
   } catch { console.error('Resolver scan failed; check configuration and RPC'); }
   if (env.RUN_ONCE === '1') break;
   await new Promise(r=>setTimeout(r,10_000));

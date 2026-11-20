@@ -1,9 +1,10 @@
 import { sc, normalizeMarket, Networks } from '../shared/stellar.mjs';
 import { digest, resolvePrice, resolveEvent } from './policy.mjs';
 
-export async function processMarket({client, source, sign, id, providers, saveEvidence, attemptStore, network = Networks.TESTNET, now = () => Math.floor(Date.now()/1000)}) {
+export async function processMarket({client, source, sign, id, providers, saveEvidence, attemptStore, onMarketRead, network = Networks.TESTNET, now = () => Math.floor(Date.now()/1000)}) {
   let m = normalizeMarket(await client.read(source, 'get_market', [sc.u32(id)]));
   const closesAt = Number(m.closes_at);
+  await onMarketRead?.({id, closesAt, deadline:Number(m.deadline), status:m.status, now:now()});
   if (m.status >= 2 || now() < closesAt || now() > Number(m.deadline)) return 'skipped';
   if (m.status === 0) await client.write(source, sign, 'request', [sc.u32(id)]);
   const contract = providers.contractId;
