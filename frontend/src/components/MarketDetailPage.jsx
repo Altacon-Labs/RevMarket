@@ -1,7 +1,7 @@
-import {useEffect, useState} from 'react';
-import {Link, useLocation, useParams} from 'react-router-dom';
+import {useEffect, useRef, useState} from 'react';
+import {Link, useLocation} from 'react-router-dom';
 import {formatAmount} from '../../../shared/amount.mjs';
-import {marketSlug} from '../lib/market-path.mjs';
+import {loadMarketDetail, parseMarketId, parseMarketSide} from '../lib/market-path.mjs';
 import {fetchPriceCandles} from '../lib/market-data.mjs';
 import MarketAvatar from './MarketAvatar.jsx';
 import MiniChart from './MiniChart.jsx';
@@ -17,6 +17,9 @@ export default function MarketDetailPage({
   markets,
   positions,
   address,
+  source,
+  client,
+  loading = false,
   authenticated,
   onConnect,
   onLogin,
@@ -27,25 +30,106 @@ export default function MarketDetailPage({
   onClaim,
   onRequest,
 }) {
-  const {slug} = useParams();
   const location = useLocation();
-  const [side, setSide] = useState(() => {
-    const value = new URLSearchParams(location.search).get('side');
-    return value === '0' || value === '1' ? Number(value) : 0;
-  });
+  const parsedId = parseMarketId(location.hash);
+  const marketId = parsedId.valid ? parsedId.id : null;
+  const loadedMarket = parsedId.valid ? markets.find(item => Number(item.id) === marketId) || null : null;
+  const [side, setSide] = useState(() => parseMarketSide(location.search));
   const [amount, setAmount] = useState('10');
   const [submitError, setSubmitError] = useState('');
   const [range, setRange] = useState('week');
   const [priceSeries, setPriceSeries] = useState(null);
   const [chartLoading, setChartLoading] = useState(false);
   const [chartError, setChartError] = useState('');
-  const marketId = Number(location.hash.slice(1));
-  const market = markets.find(item => Number(item.id) === marketId) || markets.find(item => marketSlug(item.question) === slug);
+  const [directState, setDirectState] = useState({
+    key: '',
+    status: 'idle',
+    market: null,
+    position: null,
+    error: '',
+  });
+  const [retryCount, setRetryCount] = useState(0);
+  const requestSeq = useRef(0);
 
   useEffect(() => {
-    const value = new URLSearchParams(location.search).get('side');
-    setSide(value === '0' || value === '1' ? Number(value) : 0);
-  }, [location.search, marketId]);
+    setSide(parseMarketSide(location.search));
+  }, [location.search, location.hash]);
+
+  const requestKey = `${location.hash}|${address || ''}|${source || ''}`;
+  const market = loadedMarket || (directState.key === requestKey ? directState.market : null);
+  const hasLoadedPosition = parsedId.valid && Boolean(address) && Object.prototype.hasOwnProperty.call(positions, marketId);
+  const position = parsedId.valid
+    ? hasLoadedPosition
+      ? positions[marketId]
+      : directState.key === requestKey
+        ? directState.position
+        : null
+    : null;
+
+  useEffect(() => {
+    if (!parsedId.valid) {
+      requestSeq.current += 1;
+      setDirectState({
+        key: requestKey,
+        status: 'missing',
+        market: null,
+        position: null,
+        error: parsedId.reason === 'missing' ? 'Market identifier is missing from the link.' : 'Market identifier is invalid or out of range.',
+      });
+      return;
+    }
+
+    const needsMarket = !loadedMarket;
+    const needsPosition = Boolean(address) && !hasLoadedPosition && Boolean(client) && Boolean(source);
+    if (!needsMarket && !needsPosition) {
+      requestSeq.current += 1;
+      setDirectState({
+        key: requestKey,
+        status: 'ready',
+        market: loadedMarket,
+        position: hasLoadedPosition ? positions[marketId] : null,
+        error: '',
+      });
+      return;
+    }
+
+    if (needsMarket && loading && (!client || !source)) {
+      return;
+    }
+
+    let active = true;
+    const seq = ++requestSeq.current;
+    setDirectState(prev => ({
+      key: requestKey,
+      status: 'loading',
+      market: loadedMarket || (prev.key === requestKey ? prev.market : null),
+      position: null,
+      error: '',
+    }));
+
+    loadMarketDetail({
+      hash: location.hash,
+      markets,
+      positions,
+      client,
+      source,
+      address,
+      isCurrent: () => active && requestSeq.current === seq,
+    }).then(result => {
+      if (!active || requestSeq.current !== seq || !result.committed) return;
+      setDirectState({
+        key: requestKey,
+        status: result.status,
+        market: result.market,
+        position: result.position,
+        error: result.error || '',
+      });
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [location.hash, requestKey, parsedId.valid, parsedId.reason, marketId, loadedMarket, hasLoadedPosition, address, source, client, loading, retryCount]);
 
   useEffect(() => {
     if (market?.kind !== 'Price') {
@@ -71,9 +155,52 @@ export default function MarketDetailPage({
     return () => {active = false; controller.abort(); clearInterval(refresh);};
   }, [market?.id, market?.kind, market?.asset, range]);
 
-  if (!market) return <section className="page-state"><p className="eyebrow">MARKET NOT FOUND</p><h1>This market is unavailable</h1><p>It may have been removed or is not in the currently loaded markets.</p><Link className="button button-secondary" to="/markets">Back to markets</Link></section>;
+  if (!parsedId.valid) {
+    return (
+      <section className="page-state" role="status">
+        <p className="eyebrow">MARKET NOT FOUND</p>
+        <h1>Invalid or missing market link</h1>
+        <p>{parsedId.reason === 'missing' ? 'This link is missing a market identifier (#id).' : 'The market identifier in this link is malformed or out of range.'}</p>
+        <Link className="button button-secondary" to="/markets">Back to markets</Link>
+      </section>
+    );
+  }
 
-  const position = positions[market.id];
+  const isFetchingDirect = !market && (loading || directState.key !== requestKey || directState.status === 'loading');
+  if (isFetchingDirect) {
+    return (
+      <section className="page-state" role="status">
+        <p className="eyebrow">LOADING MARKET</p>
+        <h1>Loading market #{marketId}</h1>
+        <p>Fetching market details from Stellar Testnet.</p>
+      </section>
+    );
+  }
+
+  if (!market && directState.status === 'error') {
+    return (
+      <section className="page-state" role="alert">
+        <p className="eyebrow">RPC UNAVAILABLE</p>
+        <h1>Could not load market #{marketId}</h1>
+        <p>{directState.error || 'The Stellar RPC request failed while reading this market.'}</p>
+        <div className="detail-meta">
+          <button type="button" className="button button-primary" onClick={() => setRetryCount(c => c + 1)}>Retry</button>
+          <Link className="button button-secondary" to="/markets">Back to markets</Link>
+        </div>
+      </section>
+    );
+  }
+
+  if (!market) {
+    return (
+      <section className="page-state" role="status">
+        <p className="eyebrow">MARKET NOT FOUND</p>
+        <h1>This market is unavailable</h1>
+        <p>{directState.error || 'It may have been removed or does not exist on the contract.'}</p>
+        <Link className="button button-secondary" to="/markets">Back to markets</Link>
+      </section>
+    );
+  }
   const closed = now >= Number(market.closes_at);
   const timedOut = now > Number(market.deadline) && market.status < 2;
   const canClaim = position && !position.claimed && (market.status === 3 || timedOut || (market.status === 2 && position.side === market.outcome));
