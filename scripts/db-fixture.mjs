@@ -9,6 +9,9 @@ export function syntheticWallet(i){
 const contentHash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const statuses=['draft','submitted','changes_requested','rejected','approved'];
 
+/** Deterministic fixture wallets for the release rehearsal; never real accounts. */
+export const REHEARSAL_FIXTURE_TAG='rehearsal-fixture-v1';
+
 export function insertRevision(db,{draftId,number,time}){
   const question=`Fixture question ${draftId}.${number}`;
   const id=Number(db.prepare(`INSERT INTO draft_revisions(draft_id,revision_number,question,category,trading_close,yes_rule,no_rule,sources_json,content_hash,created_at)

@@ -4,20 +4,24 @@ import { createClient } from '../shared/stellar.mjs';
 import { processMarket } from './runner.mjs';
 import { createAttemptStore } from './attempts.mjs';
 import { priceObservations, eventObservations } from './providers.mjs';
+
 const env = process.env;
 if (!env.RESOLVER_SECRET || !env.CONTRACT_ID) throw new Error('Set RESOLVER_SECRET and CONTRACT_ID in server environment');
+
 const key = Keypair.fromSecret(env.RESOLVER_SECRET);
 const source = key.publicKey();
 const client = createClient({rpcUrl:env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',contractId:env.CONTRACT_ID});
-const attemptStore = createAttemptStore(new URL('./attempts.sqlite', import.meta.url).pathname);
+const attemptStore = createAttemptStore(env.ATTEMPTS_DB_PATH || new URL('./attempts.sqlite', import.meta.url).pathname);
 const sign = async (xdr, network) => { const tx=TransactionBuilder.fromXDR(xdr,network); tx.sign(key); return tx.toXDR(); };
 const providers = {contractId:env.CONTRACT_ID, price:priceObservations, event:id=>eventObservations(JSON.parse(env.EVENT_SOURCE_URLS || '[]'),id)};
-const directory = new URL('./evidence/', import.meta.url);
+const directory = new URL(env.EVIDENCE_DIR ? `file://${env.EVIDENCE_DIR.replace(/\/$/,'')}/` : './evidence/', import.meta.url);
 await mkdir(directory, {recursive:true});
+
 const saveEvidence = async (hash, body) => {
   try { await writeFile(new URL(`${hash}.json`,directory), JSON.stringify(body), {flag:'wx',mode:0o600}); }
   catch(e) { if(e.code !== 'EEXIST') throw e; }
 };
+
 // One worker instance per resolver account. Never log credentials or upstream bodies.
 do {
   try {

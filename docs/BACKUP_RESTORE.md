@@ -10,7 +10,11 @@ The backend opens SQLite in WAL mode. Recently committed transactions live in `r
 
 ## Commands
 
-All commands run from the repository root. They print one JSON line on success. On failure they print one line, `db:<command> failed [CODE]: <message>`, to stderr and exit 1.
+All commands run from the repository root. The end-to-end recovery rehearsal (`npm run db:drill`) exercises these commands against a disposable database; its results are fixture measurements and do not replace the live checks listed in the rehearsal report.
+
+## Release rehearsal scope
+
+The restart and recovery rehearsal covers: draft review on a disposable database, worker interruption after submission, API restart and reconciliation, and backup restoration with row-level agreement against expected outcomes. RPC is mocked with a controllable transport and fixtures are synthetic. Each run writes a report that labels every result as `fixture` (mocked RPC and synthetic data) or `live` (real Testnet). Live Testnet smoke checks are kept separate and are not part of the rehearsal command; they remain open until run against Testnet. They print one JSON line on success. On failure they print one line, `db:<command> failed [CODE]: <message>`, to stderr and exit 1.
 
 ### 1. Back up (API may keep running)
 
