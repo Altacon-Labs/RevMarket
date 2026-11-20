@@ -21,6 +21,7 @@ export async function processMarket({client, source, sign, id, providers, saveEv
   }
   // Existing terminal attempts must remain available for inspection; do not overwrite their unique key.
   if (savedAttempt) return savedAttempt.status;
+  // Rehearsal hook: callers may inject a fault after a prepared attempt is persisted to exercise restart/reconciliation.
   let observations, decision, method, args;
   if (m.kind === 'Price') {
     observations = await providers.price(m.asset);

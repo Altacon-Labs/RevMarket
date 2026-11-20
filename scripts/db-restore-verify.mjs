@@ -8,7 +8,7 @@ import {promoteRestore,verifyRestore} from '../backend/backup.mjs';
 import {defaultDatabasePath,defaultPort,runCli,UsageError} from './db-cli.mjs';
 
 const usage='Usage: db:restore-verify <backup.sqlite> --target <new dir> [--manifest <file>] | db:restore-verify --promote --target <verified dir> [--db <path>] [--port <n>]';
-const sq=p=>`'${p.replace(/'/g,`'\\''`)}'`;
+const sq=p=>`'${p.replace(/'/g,`'\''`)}'`;
 const pq=p=>`'${p.replace(/'/g,"''")}'`;
 
 function rollbackCommands(active,rollback,stamp){

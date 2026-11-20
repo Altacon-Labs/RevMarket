@@ -20,6 +20,18 @@ const writerScript=fileURLToPath(new URL('./db-writer.mjs',import.meta.url));
 const ms=t=>Math.round(t*100)/100;
 const sleep=n=>new Promise(r=>setTimeout(r,n));
 
+function assertDrillOutcome(result){
+  const c=result.checks;
+  const expect=(cond,msg)=>{if(!cond)throw new Error(`drill assertion failed: ${msg}`);};
+  expect(c.flippedByte==='HASH_MISMATCH','flipped byte must be rejected with HASH_MISMATCH');
+  expect(c.corruptedPage==='INTEGRITY_FAILED'||c.corruptedPage==='NOT_SQLITE','corrupted page must be rejected');
+  expect(c.promoteWhileApiUp==='API_RUNNING','promote must refuse while API is running');
+  expect(c.promoteWhileDbOpen==='DATABASE_IN_USE','promote must refuse while database is open');
+  expect(c.liveUnchangedByRefusedPromotes===true,'live database must be unchanged by refused promotes');
+  expect(c.restoredCountsMatchManifest===true,'restored row counts must match backup manifest');
+  return result;
+}
+
 function freePort(){
   return new Promise((res,rej)=>{const s=createServer();s.on('error',rej);s.listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>res(port));});});
 }
@@ -149,6 +161,7 @@ await runCli('db:drill',async()=>{
         liveUnchangedByRefusedPromotes:liveUnchanged,restoredCountsMatchManifest:matches,preRestoreFiles:promoted.preRestore.length},
       definitions:{recovery:'verify + promote.total + restartToHealthy',cutoverDowntime:'apiStop + promote.total + restartToHealthy'}
     };
+    assertDrillOutcome(result);
     process.stdout.write(JSON.stringify(result,null,2)+'\n');
   }finally{
     if(writer){writer.child.kill();await writer.exited;}

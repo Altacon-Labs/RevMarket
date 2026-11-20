@@ -14,10 +14,10 @@ export const sc = {
 export function normalizeMarket(m) {
   return { ...m, kind: m.kind[0], asset: m.kind[1], threshold: m.kind[2] };
 }
-export function createClient({rpcUrl, contractId, networkPassphrase = Networks.TESTNET, maxFee = 10_000_000n}) {
+export function createClient({rpcUrl, contractId, networkPassphrase = Networks.TESTNET, maxFee = 10_000_000n, transport = null, pollIntervalMs = 1500, maxPolls = 45}) {
   if (networkPassphrase !== Networks.TESTNET) throw new Error('This release supports Stellar testnet only');
   if (!rpcUrl?.startsWith('https://')) throw new Error('HTTPS RPC URL required');
-  const server = new rpc.Server(rpcUrl);
+  const server = transport ?? new rpc.Server(rpcUrl);
   const contract = new Contract(contractId);
   const build = (source, method, args) => new TransactionBuilder(source, {fee:'10000', networkPassphrase})
     .addOperation(contract.call(method, ...args)).setTimeout(120).build();
@@ -28,6 +28,7 @@ export function createClient({rpcUrl, contractId, networkPassphrase = Networks.T
     if (receipt.status === 'NOT_FOUND') return {status:'unknown', hash};
     return {status:'pending', hash};
   };
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   return {
     async prepare(source, sign, method, args = []) {
       const account = await server.getAccount(source);
@@ -47,8 +48,8 @@ export function createClient({rpcUrl, contractId, networkPassphrase = Networks.T
     async writePrepared(signedXdr, hash) {
       const submittedHash = await this.submit(signedXdr);
       if (submittedHash !== hash) throw new Error(`Submitted transaction hash mismatch: ${submittedHash}`);
-      for (let i = 0; i < 45; i++) {
-        await new Promise(resolve => setTimeout(resolve, 1500));
+      for (let i = 0; i < maxPolls; i++) {
+        await sleep(pollIntervalMs);
         const state = await inspect(hash);
         if (state.status === 'confirmed') return state;
         if (state.status === 'failed') throw new Error(`Transaction failed: ${hash}`);
@@ -64,9 +65,9 @@ export function createClient({rpcUrl, contractId, networkPassphrase = Networks.T
     },
     async write(source, sign, method, args = []) {
       const prepared = await this.prepare(source, sign, method, args);
-      for (let i = 0; i < 45; i++) {
+      for (let i = 0; i < maxPolls; i++) {
         if (i === 0) await this.submit(prepared.xdr);
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await sleep(pollIntervalMs);
         const state = await inspect(prepared.hash);
         if (state.status === 'confirmed') return state;
         if (state.status === 'failed') throw new Error(`Transaction failed: ${prepared.hash}`);
