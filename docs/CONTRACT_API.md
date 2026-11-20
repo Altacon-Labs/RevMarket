@@ -104,6 +104,20 @@ await client.write(user, sign, 'predict', [
 
 Do not JSON-serialize BigInt directly; use decimal strings at HTTP boundaries. Check final confirmation hashes before retrying. `keepalive` only persists TTL extensions as a submitted transaction; a simulation is insufficient. Automatic restoration is absent.
 
+## Factory version registry (`contracts/factory`)
+
+The first slice of the proposed factory is implemented as its own crate. It only records approved market WASM hashes. It does not deploy children, check that a WASM is installed, manage reviewers, or touch collateral.
+
+```rust
+__constructor(operator: Address)
+approve_version(version: u32, wasm_hash: BytesN<32>)  // operator auth
+get_version(version: u32) -> Option<BytesN<32>>       // None for unknown versions
+```
+
+- `approve_version` rejects version `0` and an all-zero hash with `Error::Invalid` (1). Entries are append-only: a second call for the same version fails with `Error::Duplicate` (2), even with the same hash.
+- Event: topics `("approved", version)`, data `wasm_hash`.
+- Storage: the operator is in instance storage. Each `Version(u32)` entry is in persistent storage. Writes and successful reads extend the touched entry to 1,036,800 ledgers (about 60 days) once fewer than half remain, using the same `TTL` policy as the market contract. An archived entry has to be restored before it can be read again.
+
 ## Proposed v2 API — design contract, not implemented ABI
 
 Names/types below define an implementation target, not callable methods at the current contract address. Generate final bindings from compiled specs after review. Use enums instead of assuming old side/status numeric values. Child methods identify the market by contract address and have no legacy market ID parameter.
