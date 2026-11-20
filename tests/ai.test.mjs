@@ -167,7 +167,7 @@ test('AI assist rejects non-owner and non-editable drafts',async t=>{
   const creator=Keypair.random(),other=Keypair.random(),reviewer=Keypair.random();
   const cc=await login(creator),co=await login(other),cr=await login(reviewer),ca=await login(admin);
   await call('/admin/reviewers',{method:'POST',cookie:ca,body:{wallet:reviewer.publicKey(),action:'add'}});
-  const created=await call('/drafts',{method:'POST',cookie:cc,body:{question:'Q?',tradingClose:2000}});
+  const created=await call('/drafts',{method:'POST',cookie:cc,body:{question:'Q?',tradingClose:2000,resolutionDeadline:88400,yesRule:'Spot > 100',noRule:'Spot <= 100',sources:['https://api.coinbase.com/v2/prices/BTC-USD/spot'],unavailableDataRule:'Resolve Invalid if source unavailable'}});
   // Non-owner cannot request AI
   assert.equal((await call(`/drafts/${created.body.id}/ai-assist`,{method:'POST',cookie:co,body:{}})).status,403);
   // Submit to make it non-editable

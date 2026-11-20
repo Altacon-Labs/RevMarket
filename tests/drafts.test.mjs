@@ -25,7 +25,18 @@ async function fixture(t,{superAdminWallets=[],rateLimit=1000}={}){
 }
 
 function draftBody(overrides={}){
-  return {question:'Will BTC reach $100k by end of 2026?',tradingClose:2000,...overrides};
+  return {
+    question:'Will BTC reach $100k by end of 2026?',
+    tradingClose:2000,
+    observationTime:2060,
+    resolutionDeadline:88400,
+    yesRule:'BTC/USD spot median across sources is strictly above $100,000 at observationTime.',
+    noRule:'BTC/USD spot median across sources is at or below $100,000 at observationTime.',
+    equalityRule:'Resolves NO on exact equality at $100,000.',
+    sources:['https://api.coinbase.com/v2/prices/BTC-USD/spot','https://api.kraken.com/0/public/Ticker?pair=XBTUSD'],
+    unavailableDataRule:'Resolves Invalid if fewer than two sources report before resolutionDeadline.',
+    ...overrides
+  };
 }
 async function currentRevision(f,id,cookie){
   return (await f.call(`/drafts/${id}`,{cookie})).body.revisions[0].id;
@@ -879,4 +890,80 @@ test('W23: stale, expired, withdrawn, revoked or non-owner approvals cannot prod
   assert.equal(checkRevoked.body.intent.invalidatedReason,'reviewer_revoked');
 });
 
+// --- Submit-time readiness validation tests ---
+test('partial manual and AI-assisted drafts remain saveable and editable, but submit rejects incomplete rules without audit events',async t=>{
+  const f=await fixture(t);
+  const creator=Keypair.random();
+  const cookie=await f.login(creator);
 
+  // Create a minimal partial manual draft
+  const partial=await f.call('/drafts',{method:'POST',cookie,body:{question:'Will ETH exceed $5,000?',tradingClose:2000}});
+  assert.equal(partial.status,201);
+  const id=partial.body.id;
+
+  // Attempt to submit the incomplete draft
+  const sub1=await f.call(`/drafts/${id}/submit`,{method:'POST',cookie,body:{}});
+  assert.equal(sub1.status,400);
+  assert.ok(sub1.body.fields);
+  assert.ok(sub1.body.fields.yesRule);
+  assert.ok(sub1.body.fields.noRule);
+  assert.ok(sub1.body.fields.sources);
+  assert.ok(sub1.body.fields.unavailableDataRule);
+  assert.ok(sub1.body.fields.resolutionDeadline);
+
+  // Failed submission preserves draft status and writes no 'submitted' audit event
+  const afterFail=await f.call(`/drafts/${id}`,{cookie});
+  assert.equal(afterFail.body.draft.status,'draft');
+  const auditsAfterFail=f.db.prepare('SELECT action FROM audit_events WHERE draft_id=? ORDER BY id ASC').all(id);
+  assert.deepEqual(auditsAfterFail.map(a=>a.action),['created']);
+
+  // Partial AI-assisted revision remains editable
+  const editPartial=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:{expectedRevisionId:partial.body.revisionId,question:'Will ETH exceed $5,000 by Q4?',tradingClose:2000,origin:'ai_assisted',yesRule:'ETH spot > 5000'}});
+  assert.equal(editPartial.status,200);
+
+  // Complete the draft and submit
+  const editComplete=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({expectedRevisionId:editPartial.body.revisionId,question:'Will ETH exceed $5,000 by Q4?'})});
+  assert.equal(editComplete.status,200);
+  const subOk=await f.call(`/drafts/${id}/submit`,{method:'POST',cookie,body:{}});
+  assert.equal(subOk.status,200);
+  assert.equal(subOk.body.status,'submitted');
+
+  const auditsFinal=f.db.prepare('SELECT action FROM audit_events WHERE draft_id=? ORDER BY id ASC').all(id);
+  assert.deepEqual(auditsFinal.map(a=>a.action),['created','revised','revised','submitted']);
+});
+
+test('submit rejects identical YES/NO criteria, duplicate/empty sources, and incompatible timing',async t=>{
+  const f=await fixture(t);
+  const creator=Keypair.random();
+  const cookie=await f.login(creator);
+
+  // 1. Identical YES and NO criteria
+  const sameRules=await f.call('/drafts',{method:'POST',cookie,body:draftBody({yesRule:'Same rule',noRule:'Same rule'})});
+  const resSame=await f.call(`/drafts/${sameRules.body.id}/submit`,{method:'POST',cookie,body:{}});
+  assert.equal(resSame.status,400);
+  assert.match(resSame.body.fields.noRule,/distinct/i);
+
+  // 2. Duplicate sources
+  const dupSources=await f.call('/drafts',{method:'POST',cookie,body:draftBody({sources:['https://a.example','https://a.example']})});
+  const resDup=await f.call(`/drafts/${dupSources.body.id}/submit`,{method:'POST',cookie,body:{}});
+  assert.equal(resDup.status,400);
+  assert.match(resDup.body.fields.sources,/duplicate/i);
+
+  // 3. Incompatible observationTime (< tradingClose) and resolutionDeadline (<= tradingClose or < observationTime)
+  const badObs=await f.call('/drafts',{method:'POST',cookie,body:draftBody({tradingClose:2000,observationTime:1900,resolutionDeadline:2500})});
+  const resObs=await f.call(`/drafts/${badObs.body.id}/submit`,{method:'POST',cookie,body:{}});
+  assert.equal(resObs.status,400);
+  assert.ok(resObs.body.fields.observationTime);
+
+  const badDeadline=await f.call('/drafts',{method:'POST',cookie,body:draftBody({tradingClose:2000,observationTime:2200,resolutionDeadline:2100})});
+  const resDeadline=await f.call(`/drafts/${badDeadline.body.id}/submit`,{method:'POST',cookie,body:{}});
+  assert.equal(resDeadline.status,400);
+  assert.ok(resDeadline.body.fields.resolutionDeadline);
+
+  // 4. Expired tradingClose at submission time
+  const expiredClose=await f.call('/drafts',{method:'POST',cookie,body:draftBody({tradingClose:2000,observationTime:2100,resolutionDeadline:2200})});
+  f.setClock(2000);
+  const resExpired=await f.call(`/drafts/${expiredClose.body.id}/submit`,{method:'POST',cookie,body:{}});
+  assert.equal(resExpired.status,400);
+  assert.ok(resExpired.body.fields.tradingClose);
+});

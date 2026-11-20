@@ -50,7 +50,15 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 | DELETE `/api/me` | Session + Origin | Delete own profile, activity, sessions and outstanding challenges; chain data remains |
 | GET `/api/admin/network` | Signed session + super-admin allowlist | Returns network availability; Mainnet remains unavailable until deployed and supported |
 | POST `/api/market-image` | Signed wallet session + matching `X-Stellar-Wallet` header | Accepts one JPEG, PNG, or WebP up to 5 MB; pins it to public IPFS and returns its CID |
+| POST `/api/drafts` | Session + Origin | Create a manual or AI-assisted draft; partial drafts require only `question` and `tradingClose` |
+| GET `/api/drafts` | Session | List own drafts (latest 100) |
+| GET `/api/drafts/:id` | Session (owner, active reviewer, or super-admin) | Fetch draft metadata, revision history, and review decisions |
 | PUT `/api/drafts/:id` | Owner session + Origin | Draft fields plus required `expectedRevisionId` (the current revision id); creates the next revision, resets `approved`/`changes_requested` to `draft` and invalidates pending publication intents. A stale id returns 409 `{error,code:'revision_conflict',currentRevisionId,currentRevisionNumber}` and writes nothing |
+| POST `/api/drafts/:id/submit` | Session + Origin (owner) | Validate stored revision completeness (`yesRule`, `noRule`, `sources`, `unavailableDataRule`, and compatible `tradingClose` / `observationTime` / `resolutionDeadline`) before moving draft to `submitted`; failed validation returns HTTP 400 with field errors, preserves draft status, and records no submission audit event |
+| POST `/api/drafts/:id/withdraw` | Session + Origin (owner) | Return a `submitted` or `approved` draft back to `draft` |
+| POST `/api/drafts/:id/review` | Session + Origin (active non-owner reviewer) | Record `changes_requested`, `rejected`, or `approved` decision on a `submitted` draft |
+| POST `/api/drafts/:id/ai-assist` | Session + Origin (owner) | Request bounded AI drafting suggestions for an editable draft (`draft` or `changes_requested`) |
+| GET `/api/review-queue` | Session (active reviewer or super-admin) | List `submitted` drafts awaiting review |
 | POST `/api/drafts/:id/publication-intents` | Signed creator session + Origin | Creates or reuses one active off-chain publication intent (`status: pending`) pinned to the approved revision, rules digest, reviewer, target network, expiry and exact deployment parameters |
 | GET `/api/drafts/:id/publication-intents` | Owner, active reviewer, or super-admin | Lists off-chain publication intents for the draft |
 | GET `/api/publication-intents/:id` | Owner, active reviewer, or super-admin | Reads one off-chain publication intent (`pending`, `invalidated`, or `expired`; `confirmedMarket: false`, `deployed: false`) |

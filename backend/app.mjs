@@ -141,11 +141,65 @@ const draftFields=['question','category','tradingClose','observationTime','resol
 const draftRevisionFields=['question','category','metadata_json','trading_close','observation_time','resolution_deadline','yes_rule','no_rule','equality_rule','sources_json','fallback_rule','unavailable_data_rule','collateral','fee_bps','resolver','policy_version','implementation_version'];
 const intentOverrideFields=['revisionId','targetNetwork','question','category','tradingClose','observationTime','resolutionDeadline','yesRule','noRule','equalityRule','sources','fallbackRule','unavailableDataRule','collateral','feeBps','resolver','policyVersion','implementationVersion','parameters'];
 function validateDraftBody(body){
-  if(typeof body.question!=='string'||body.question.length===0||body.question.length>512)throw new ApiError(400,'Question must be 1–512 characters');
+  if(typeof body.question!=='string'||body.question.trim().length===0||body.question.length>512)throw new ApiError(400,'Question must be 1–512 characters');
   if(typeof body.tradingClose!=='number'||!Number.isSafeInteger(body.tradingClose)||body.tradingClose<=0)throw new ApiError(400,'Valid trading close timestamp required');
+  if(body.observationTime!==undefined&&body.observationTime!==null&&(typeof body.observationTime!=='number'||!Number.isSafeInteger(body.observationTime)||body.observationTime<=0))throw new ApiError(400,'Observation time must be a positive integer timestamp or null');
+  if(body.resolutionDeadline!==undefined&&body.resolutionDeadline!==null&&(typeof body.resolutionDeadline!=='number'||!Number.isSafeInteger(body.resolutionDeadline)||body.resolutionDeadline<=0))throw new ApiError(400,'Resolution deadline must be a positive integer timestamp or null');
   if(body.feeBps!==undefined&&(typeof body.feeBps!=='number'||!Number.isSafeInteger(body.feeBps)||body.feeBps<0||body.feeBps>1000))throw new ApiError(400,'Fee basis points must be 0–1000');
   if(body.sources!==undefined&&!Array.isArray(body.sources))throw new ApiError(400,'Sources must be an array');
   if(body.metadata!==undefined&&(typeof body.metadata!=='object'||Array.isArray(body.metadata)||body.metadata===null))throw new ApiError(400,'Metadata must be an object');
+}
+function validateRevisionForSubmission(revision,currentTime){
+  if(!revision)throw new ApiError(404,'No draft revision found');
+  const fields={};
+  if(typeof revision.question!=='string'||revision.question.trim().length===0||revision.question.length>512){
+    fields.question='Question must be 1-512 non-whitespace characters';
+  }
+  if(typeof revision.yes_rule!=='string'||revision.yes_rule.trim().length===0){
+    fields.yesRule='YES resolution criteria (yesRule) is required before submission';
+  }
+  if(typeof revision.no_rule!=='string'||revision.no_rule.trim().length===0){
+    fields.noRule='NO resolution criteria (noRule) is required before submission';
+  }else if(typeof revision.yes_rule==='string'&&revision.yes_rule.trim()===revision.no_rule.trim()){
+    fields.noRule='YES and NO resolution criteria must be distinct';
+  }
+  let sources=[];
+  try{sources=JSON.parse(revision.sources_json||'[]');}catch{sources=[];}
+  if(!Array.isArray(sources)||sources.length===0){
+    fields.sources='At least one resolution source (sources) is required before submission';
+  }else if(sources.length>10||sources.some(s=>typeof s!=='string'||s.trim().length===0)){
+    fields.sources='Sources must contain 1-10 non-empty source strings';
+  }else if(new Set(sources.map(s=>s.trim())).size!==sources.length){
+    fields.sources='Sources must not contain duplicate entries';
+  }
+  if(typeof revision.unavailable_data_rule!=='string'||revision.unavailable_data_rule.trim().length===0){
+    fields.unavailableDataRule='Unavailable-data treatment (unavailableDataRule) is required before submission';
+  }
+  const close=revision.trading_close;
+  const obs=revision.observation_time;
+  const deadline=revision.resolution_deadline;
+  if(typeof close!=='number'||!Number.isSafeInteger(close)||close<=currentTime){
+    fields.tradingClose='Trading close (tradingClose) must be a future timestamp';
+  }
+  if(obs!==null&&obs!==undefined){
+    if(typeof obs!=='number'||!Number.isSafeInteger(obs)||obs<=0){
+      fields.observationTime='Observation time (observationTime) must be a positive integer timestamp';
+    }else if(typeof close==='number'&&obs<close){
+      fields.observationTime='Observation time (observationTime) must be at or after tradingClose';
+    }
+  }
+  if(deadline===null||deadline===undefined||typeof deadline!=='number'||!Number.isSafeInteger(deadline)||deadline<=0){
+    fields.resolutionDeadline='Resolution deadline (resolutionDeadline) is required before submission';
+  }else if(typeof close==='number'&&deadline<=close){
+    fields.resolutionDeadline='Resolution deadline (resolutionDeadline) must be strictly after tradingClose';
+  }else if(obs!==null&&obs!==undefined&&typeof obs==='number'&&deadline<obs){
+    fields.resolutionDeadline='Resolution deadline (resolutionDeadline) must be at or after observationTime';
+  }
+  const errorKeys=Object.keys(fields);
+  if(errorKeys.length>0){
+    const summary=`Draft is incomplete for review (${errorKeys.join(', ')}): ${Object.values(fields).join('; ')}`;
+    throw new ApiError(400,summary,{fields});
+  }
 }
 class ApiError extends Error {constructor(status,message,extra){super(message);this.status=status;this.extra=extra;}}
 function object(body,fields){
@@ -463,8 +517,10 @@ export function createApi(options={}){
           if(!draft)throw new ApiError(404,'Draft not found');
           if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can submit a draft');
           if(!['draft','changes_requested'].includes(draft.status))throw new ApiError(409,`Cannot submit a draft in status: ${draft.status}`);
+          const revision=db.prepare('SELECT * FROM draft_revisions WHERE id=?').get(draft.current_revision_id);
+          validateRevisionForSubmission(revision,time);
           db.prepare("UPDATE drafts SET status='submitted',updated_at=? WHERE id=?").run(time,draftId);
-          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'submitted','{}',time);
+          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'submitted',JSON.stringify({revisionId:revision.id,revisionNumber:revision.revision_number}),time);
           return send(200,{status:'submitted'});
         }
         // POST /api/drafts/:id/withdraw
