@@ -2,12 +2,14 @@ import { Keypair, TransactionBuilder } from '@stellar/stellar-sdk';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createClient } from '../shared/stellar.mjs';
 import { processMarket } from './runner.mjs';
+import { createAttemptStore } from './attempts.mjs';
 import { priceObservations, eventObservations } from './providers.mjs';
 const env = process.env;
 if (!env.RESOLVER_SECRET || !env.CONTRACT_ID) throw new Error('Set RESOLVER_SECRET and CONTRACT_ID in server environment');
 const key = Keypair.fromSecret(env.RESOLVER_SECRET);
 const source = key.publicKey();
 const client = createClient({rpcUrl:env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',contractId:env.CONTRACT_ID});
+const attemptStore = createAttemptStore(new URL('./attempts.sqlite', import.meta.url).pathname);
 const sign = async (xdr, network) => { const tx=TransactionBuilder.fromXDR(xdr,network); tx.sign(key); return tx.toXDR(); };
 const providers = {contractId:env.CONTRACT_ID, price:priceObservations, event:id=>eventObservations(JSON.parse(env.EVENT_SOURCE_URLS || '[]'),id)};
 const directory = new URL('./evidence/', import.meta.url);
@@ -22,7 +24,7 @@ do {
     const count = await client.read(source,'count');
     if (count > 1000) throw new Error('Scan limit exceeded; deploy an indexer before scaling');
     for (let id=0; id<count; id++) {
-      try { const result=await processMarket({client,source,sign,id,providers,saveEvidence}); if(result==='settled') console.log(`Market ${id} settled`); }
+      try { const result=await processMarket({client,source,sign,id,providers,saveEvidence,attemptStore}); if(result==='settled') console.log(`Market ${id} settled`); }
       catch { console.error(`Market ${id}: resolution deferred; inspect providers and on-chain status`); }
     }
   } catch { console.error('Resolver scan failed; check configuration and RPC'); }
