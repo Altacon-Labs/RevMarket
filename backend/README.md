@@ -46,6 +46,7 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 | DELETE `/api/me` | Session + Origin | Delete own profile, activity, sessions and outstanding challenges; chain data remains |
 | GET `/api/admin/network` | Signed session + super-admin allowlist | Returns network availability; Mainnet remains unavailable until deployed and supported |
 | POST `/api/market-image` | Signed wallet session + matching `X-Stellar-Wallet` header | Accepts one JPEG, PNG, or WebP up to 5 MB; pins it to public IPFS and returns its CID |
+| PUT `/api/drafts/:id` | Owner session + Origin | Draft fields plus required `expectedRevisionId` (the current revision id); creates the next revision and resets `approved`/`changes_requested` to `draft`. A stale id returns 409 `{error,code:'revision_conflict',currentRevisionId,currentRevisionNumber}` and writes nothing |
 
 No user-list/admin, balance, betting, delegation-grant or automation-execution endpoint exists. The session is an off-chain identity convenience, not authority over escrow or wallet funds.
 

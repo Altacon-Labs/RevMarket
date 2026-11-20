@@ -1,6 +1,6 @@
 import {useState} from 'react';
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
-import {createDraft, requestAiAssist} from '../lib/backend.mjs';
+import {createDraft, requestAiAssist, updateDraft} from '../lib/backend.mjs';
 
 export default function CreateMarketModal({busy, previewMode, onClose, onCreate}) {
   const [kind, setKind] = useState('event');
@@ -8,8 +8,10 @@ export default function CreateMarketModal({busy, previewMode, onClose, onCreate}
   const [question, setQuestion] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSuggestions, setAiSuggestions] = useState(null);
+  const [savedDraft, setSavedDraft] = useState(null);
+  const [revisionConflict, setRevisionConflict] = useState(null);
 
-  async function handleAiAssist() {
+  async function handleAiAssist(overwriteRevisionId) {
     if (!question.trim()) {
       setError('Please provide an initial question to analyze with AI.');
       return;
@@ -18,16 +20,32 @@ export default function CreateMarketModal({busy, previewMode, onClose, onCreate}
     setAiLoading(true);
     try {
       const closesAt = Math.floor(Date.now() / 1000) + 86400 * 7;
-      const draft = await createDraft({
+      const draftData = {
         question: question.trim(),
         category: kind,
-        tradingClose: closesAt,
-        origin: 'manual'
-      });
-      const res = await requestAiAssist(draft.id);
+        tradingClose: closesAt
+      };
+      let next;
+      if (!savedDraft) {
+        const draft = await createDraft({...draftData, origin: 'manual'});
+        next = {draftId: draft.id, revisionId: draft.revisionId, revisionNumber: 1};
+      } else {
+        // Edit the same draft, based on the revision this modal last saved (or, after an explicit
+        // overwrite choice, on the newer revision reported by the conflict response).
+        const saved = await updateDraft(savedDraft.draftId, draftData, overwriteRevisionId ?? savedDraft.revisionId);
+        next = {draftId: savedDraft.draftId, revisionId: saved.revisionId, revisionNumber: saved.revisionNumber};
+      }
+      setSavedDraft(next);
+      setRevisionConflict(null);
+      const res = await requestAiAssist(next.draftId);
       setAiSuggestions(res.suggestions);
     } catch (err) {
-      setError(err.message || 'AI assistance request failed');
+      // A stale edit keeps the typed text untouched and waits for an explicit choice; nothing retries automatically.
+      if (err.status === 409 && err.body?.code === 'revision_conflict') {
+        setRevisionConflict({currentRevisionId: err.body.currentRevisionId, currentRevisionNumber: err.body.currentRevisionNumber});
+      } else {
+        setError(err.message || 'AI assistance request failed');
+      }
     } finally {
       setAiLoading(false);
     }
@@ -91,11 +109,15 @@ export default function CreateMarketModal({busy, previewMode, onClose, onCreate}
           <label>Question
             <div style={{display: 'flex', gap: '8px', marginTop: '4px'}}>
               <input name="question" value={question} onChange={e => setQuestion(e.target.value)} required maxLength="512" placeholder="Use a precise, verifiable yes/no question" style={{flex: 1}} />
-              <button type="button" className="button button-secondary" disabled={aiLoading || busy} onClick={handleAiAssist} style={{whiteSpace: 'nowrap'}}>
+              <button type="button" className="button button-secondary" disabled={aiLoading || busy} onClick={() => handleAiAssist()} style={{whiteSpace: 'nowrap'}}>
                 {aiLoading ? 'Analyzing…' : 'Improve with AI'}
               </button>
             </div>
           </label>
+          {revisionConflict && <div className="form-note" role="alert" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
+            <p><PhosphorIcon name="info" size={14} /> This draft was changed in another tab or window (now revision {revisionConflict.currentRevisionNumber}). Your text is still here; nothing was overwritten.</p>
+            <button type="button" className="button button-secondary" disabled={aiLoading || busy} onClick={() => handleAiAssist(revisionConflict.currentRevisionId)}>Save my version as a new revision</button>
+          </div>}
           {aiSuggestions && <div className="form-note" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
             <p><strong>AI Suggestions:</strong></p>
             {aiSuggestions.suggestedQuestion && <p style={{cursor: 'pointer', textDecoration: 'underline'}} onClick={() => applySuggestion(aiSuggestions.suggestedQuestion)}>

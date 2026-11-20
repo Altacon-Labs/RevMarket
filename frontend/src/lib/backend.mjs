@@ -18,6 +18,7 @@ export async function api(path, {method = 'GET', body, signal} = {}) {
   if (!response.ok) {
     const error = new Error(value.error || 'Activity service error');
     error.status = response.status;
+    error.body = value;
     throw error;
   }
   return value;
@@ -89,4 +90,8 @@ export async function requestAiAssist(draftId) {
 
 export async function createDraft(draftData) {
   return await api('/drafts', {method: 'POST', body: draftData});
+}
+
+export async function updateDraft(draftId, draftData, expectedRevisionId) {
+  return await api(`/drafts/${draftId}`, {method: 'PUT', body: {...draftData, expectedRevisionId}});
 }
