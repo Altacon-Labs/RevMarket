@@ -28,6 +28,7 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 - `server.mjs`: startup validation, environment wiring, local listener and graceful shutdown.
 - `config.mjs`: pre-listen environment validation (`BACKEND_ENV`, origins, ports, optional AI config and API/worker credential separation) and idempotent graceful shutdown coordinator.
 - `app.mjs`: version-1 HTTP routes, signed challenges, sessions, validation and limits.
+- `limiter.mjs`: bounded process-local fixed-window rate limiter, trusted reverse proxy `X-Forwarded-For` resolution and retry guidance headers.
 - `store.mjs`: SQLite schema version and persistence boundary. Add reviewed migrations when evolving the schema; newer databases are refused by older code.
 - `verified-activity.mjs`: authenticated wallet read API over indexed `market_events`, keyset cursor pagination and checkpoint freshness/gap reporting.
 - `backup.mjs`: online `VACUUM INTO` backup, restore verification and guarded promotion; see [docs/BACKUP_RESTORE.md](../docs/BACKUP_RESTORE.md) (`npm run db:backup`, `db:restore-verify`, `db:drill`).
@@ -64,9 +65,25 @@ This proves control of one Ed25519 public signing key. It is not SEP-10 authenti
 
 Activity is explicitly `unverified_client_report`: an authenticated client can report any correctly formatted transaction hash. These records are not a ledger audit, account balance or proof of successful settlement. A separate chain indexer must verify transactions and derive positions before authoritative history is shown. Current positions and payouts remain contract reads. The API retains at most 1,000 reports per profile and exposes the latest 50; no pagination or export exists yet. Users can delete their off-chain profile; public ledger history cannot be deleted by this API.
 
-## Limits and expansion
+## Limits, trusted proxy handling and expansion
 
-There is a basic process-local IP rate limit, 8 KiB JSON bodies, parameterized SQL and bounded request timeouts. Raw bodies, cookies and signatures are not logged. This is not a production internet-facing security posture: add TLS/same-origin routing, operational monitoring, distributed limits, account-auth review, backups, retention policy and deployment review before external exposure. Do not put a database under a static web root. Multiple instances and online schema migrations are not supported.
+Rate limiting is bounded and process-local for a single backend replica (`limiter.mjs`):
+
+- **Scopes and keys**:
+  - `auth` (`AUTH_RATE_LIMIT`, default `30` per `60s`): anonymous authentication routes (`POST /api/auth/challenge`, `POST /api/auth/verify`), keyed by resolved peer IP.
+  - `draft` (`DRAFT_RATE_LIMIT`, default `60` per `60s`): authenticated `/api/drafts*` (excluding `/ai-assist`), `/api/publication-intents/*`, and `GET /api/review-queue`, keyed by validated session Stellar wallet (`sessions.wallet`).
+  - `ai` (`AI_RATE_LIMIT`, default `10` per `60s`): authenticated `POST /api/drafts/:id/ai-assist`, keyed by validated session Stellar wallet so AI throttling never blocks manual draft editing (`PUT /api/drafts/:id`) or other accounts behind the same proxy.
+  - `anonymous` (`RATE_LIMIT`, default `120` per `60s`): general peer routes and unauthenticated `401` hits on wallet routes, keyed by resolved peer IP (active session `POST /api/logout` revocations isolate by session wallet so shared-NAT peer throttling never traps signed-in users).
+- **Bounded buckets and retry guidance**: Each scope reclaims expired fixed windows (`RATE_LIMIT_WINDOW_SECONDS`, default `60`) on demand and caps active keys at `RATE_LIMIT_MAX_BUCKETS` (default `1000`). Responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `X-RateLimit-Scope`; `429` and `503` responses add `Retry-After` alongside `{ error, scope, limit, windowSeconds, retryAfterSeconds, resetAt }`.
+- **Trusted reverse proxy configuration (`TRUSTED_PROXIES`)**: By default (`TRUSTED_PROXIES` unset), `X-Forwarded-For` and `X-Real-IP` are ignored completely and `req.socket.remoteAddress` is used. Set `TRUSTED_PROXIES` to comma-separated exact IPs or CIDR ranges (for example `127.0.0.1` or `10.0.0.0/8`) only when every direct listener path passes through a reverse proxy you control that appends the TCP client address to `X-Forwarded-For`. When the direct socket peer matches `TRUSTED_PROXIES`, the backend walks `X-Forwarded-For` right-to-left and selects the rightmost non-trusted valid IP so client-prepended `X-Forwarded-For` prefixes cannot spoof identity.
+
+Reproduce the two-server reverse-proxy and multi-account drill locally with:
+
+```sh
+node --experimental-sqlite backend/limiter.mjs --drill
+```
+
+JSON bodies remain capped at 8 KiB with parameterized SQL and bounded request timeouts. Raw bodies, cookies and signatures are not logged. This remains a single-replica local/proxied posture rather than a multi-replica internet-facing cluster: add TLS/same-origin routing, operational monitoring, distributed limits if scaling beyond one replica, account-auth review, backups, retention policy and deployment review before external exposure. Do not put a database under a static web root. Multiple instances and online schema migrations are not supported.
 
 Future expansion is deliberately left in [TODO.md](TODO.md): verified history/indexing, account-auth review if needed, and on-chain permissions before any separate executor. A backend profile or message signature is never automation consent. Existing outcome resolution remains in `service/worker.mjs` with its separate resolver key. No new backend contribution issue is nominated by this foundation.
 

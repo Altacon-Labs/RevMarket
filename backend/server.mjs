@@ -11,10 +11,11 @@ try {
   process.exit(1);
 }
 
-const [{openStore}, {createApi}, {validateVerifiedActivityConfig}] = await Promise.all([
+const [{openStore}, {createApi}, {validateVerifiedActivityConfig}, {buildRateLimitOptionsFromEnv, createScopedRateLimiter}] = await Promise.all([
   import('./store.mjs'),
   import('./app.mjs'),
   import('./verified-activity.mjs'),
+  import('./limiter.mjs'),
 ]);
 
 const contractId = (process.env.CONTRACT_ID || '').trim() || undefined;
@@ -25,6 +26,15 @@ try {
 } catch (err) {
   const varName = String(err?.message || '').includes('CONTRACT_ID') ? 'CONTRACT_ID' : 'INDEXER_STALE_AFTER_SECONDS';
   process.stderr.write(`Backend startup failed [CONFIG_INVALID]: Invalid configuration: ${varName}\n`);
+  process.exit(1);
+}
+
+let rateOptions;
+try {
+  rateOptions = buildRateLimitOptionsFromEnv(process.env);
+  createScopedRateLimiter(rateOptions);
+} catch (err) {
+  process.stderr.write(`Backend startup failed [CONFIG_INVALID]: ${err.message}\n`);
   process.exit(1);
 }
 
@@ -40,6 +50,7 @@ const server = createApi({
   aiConfig: config.aiConfig,
   contractId,
   staleAfterSeconds,
+  ...rateOptions,
 });
 const shutdown = createGracefulShutdown({
   server,
