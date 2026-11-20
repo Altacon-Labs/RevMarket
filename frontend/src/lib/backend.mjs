@@ -90,3 +90,7 @@ export async function requestAiAssist(draftId) {
 export async function createDraft(draftData) {
   return await api('/drafts', {method: 'POST', body: draftData});
 }
+
+export async function submitReview(draftId, {decision, reason, expectedRevisionId}) {
+  return await api(`/drafts/${draftId}/review`, {method: 'POST', body: {decision, reason, expectedRevisionId}});
+}
