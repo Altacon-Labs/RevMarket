@@ -533,6 +533,7 @@ export async function api(path, {method = 'GET', body, signal} = {}) {
   if (!response.ok) {
     const error = new Error(value.error || 'Activity service error');
     error.status = response.status;
+    error.body = value;
     throw error;
   }
   return value;
@@ -619,11 +620,12 @@ export async function submitReview(draftId, {decision, reason, expectedRevisionI
   return await api(`/drafts/${draftId}/review`, {method: 'POST', body: {decision, reason, expectedRevisionId}});
 }
 
-export async function updateDraft(draftId, draftData = {}, options = {}) {
+// expectedRevisionId is the revision this edit is based on; a stale id is rejected with 409 revision_conflict.
+export async function updateDraft(draftId, draftData = {}, {expectedRevisionId, ...options} = {}) {
   const collateral = draftData.collateral !== undefined
     ? pinCollateralForDraft(draftData.collateral, options)
     : NATIVE_XLM_SAC;
-  return await api(`/drafts/${draftId}`, {method: 'PUT', body: {...draftData, collateral}});
+  return await api(`/drafts/${draftId}`, {method: 'PUT', body: {...draftData, collateral, expectedRevisionId}});
 }
 
 export async function getDraft(draftId) {

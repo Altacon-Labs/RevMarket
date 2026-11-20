@@ -49,6 +49,7 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 | DELETE `/api/me` | Session + Origin | Delete own profile, activity, sessions and outstanding challenges; chain data remains |
 | GET `/api/admin/network` | Signed session + super-admin allowlist | Returns network availability; Mainnet remains unavailable until deployed and supported |
 | POST `/api/market-image` | Signed wallet session + matching `X-Stellar-Wallet` header | Accepts one JPEG, PNG, or WebP up to 5 MB; pins it to public IPFS and returns its CID |
+| PUT `/api/drafts/:id` | Owner session + Origin | Draft fields plus required `expectedRevisionId` (the current revision id); creates the next revision, resets `approved`/`changes_requested` to `draft` and invalidates pending publication intents. A stale id returns 409 `{error,code:'revision_conflict',currentRevisionId,currentRevisionNumber}` and writes nothing |
 | POST `/api/drafts/:id/publication-intents` | Signed creator session + Origin | Creates or reuses one active off-chain publication intent (`status: pending`) pinned to the approved revision, rules digest, reviewer, target network, expiry and exact deployment parameters |
 | GET `/api/drafts/:id/publication-intents` | Owner, active reviewer, or super-admin | Lists off-chain publication intents for the draft |
 | GET `/api/publication-intents/:id` | Owner, active reviewer, or super-admin | Reads one off-chain publication intent (`pending`, `invalidated`, or `expired`; `confirmedMarket: false`, `deployed: false`) |

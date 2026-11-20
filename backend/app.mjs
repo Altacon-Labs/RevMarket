@@ -137,7 +137,7 @@ function validateDraftBody(body){
   if(body.sources!==undefined&&!Array.isArray(body.sources))throw new ApiError(400,'Sources must be an array');
   if(body.metadata!==undefined&&(typeof body.metadata!=='object'||Array.isArray(body.metadata)||body.metadata===null))throw new ApiError(400,'Metadata must be an object');
 }
-class ApiError extends Error {constructor(status,message){super(message);this.status=status;}}
+class ApiError extends Error {constructor(status,message,extra){super(message);this.status=status;this.extra=extra;}}
 function object(body,fields){
   if(!body || Array.isArray(body) || typeof body!=='object' || Object.keys(body).some(k=>!fields.includes(k)))throw new ApiError(400,'Unexpected request fields');
 }
@@ -384,14 +384,22 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
         // PUT /api/drafts/:id — update (creates new revision, invalidates approval)
         if(req.method==='PUT'&&!subPath){
           const wallet=session(req);
-          const body=await bodyOf(req);object(body,draftFields);
+          const body=await bodyOf(req);object(body,[...draftFields,'expectedRevisionId']);
+          const expectedRevisionId=body.expectedRevisionId;
+          if(!Number.isSafeInteger(expectedRevisionId)||expectedRevisionId<=0)throw new ApiError(400,'expectedRevisionId is required');
+          delete body.expectedRevisionId;
           validateDraftBody(body);
-          const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
-          if(!draft)throw new ApiError(404,'Draft not found');
-          if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can edit a draft');
-          if(!['draft','changes_requested','approved'].includes(draft.status))throw new ApiError(409,`Cannot edit a draft in status: ${draft.status}`);
           db.exec('BEGIN IMMEDIATE');
           try{
+            // Read and compare inside the write transaction so the check and the new revision are atomic.
+            const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+            if(!draft)throw new ApiError(404,'Draft not found');
+            if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can edit a draft');
+            if(!['draft','changes_requested','approved'].includes(draft.status))throw new ApiError(409,`Cannot edit a draft in status: ${draft.status}`);
+            if(draft.current_revision_id!==expectedRevisionId){
+              const current=db.prepare('SELECT revision_number FROM draft_revisions WHERE id=?').get(draft.current_revision_id);
+              throw new ApiError(409,'Draft has a newer revision; reload before editing',{code:'revision_conflict',currentRevisionId:draft.current_revision_id,currentRevisionNumber:current?.revision_number??null});
+            }
             const maxRev=db.prepare('SELECT MAX(revision_number) AS n FROM draft_revisions WHERE draft_id=?').get(draftId).n||0;
             const revContent={question:body.question,category:body.category||'',tradingClose:body.tradingClose,yesRule:body.yesRule||'',noRule:body.noRule||'',equalityRule:body.equalityRule||'',sources:body.sources||[],fallbackRule:body.fallbackRule||'',collateral:body.collateral||'native',feeBps:body.feeBps||0,resolver:body.resolver||'',implementationVersion:body.implementationVersion||''};
             const ch=contentHash(revContent);
@@ -593,7 +601,7 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
       throw new ApiError(404,'Endpoint not found');
     }catch(e){
       // Never echo bodies, cookies, signatures or internal database errors.
-      if(!res.headersSent)send(e.status||500,{error:e.status?e.message:'Internal server error'},e.status===413?{'Connection':'close'}:{});
+      if(!res.headersSent)send(e.status||500,e.status?{error:e.message,...e.extra}:{error:'Internal server error'},e.status===413?{'Connection':'close'}:{});
       else res.end();
     }
   });

@@ -102,7 +102,7 @@ test('update a draft creates a new revision',async t=>{
   const created=await f.call('/drafts',{method:'POST',cookie,body:draftBody()});
   const draftId=created.body.id;
 
-  const updated=await f.call(`/drafts/${draftId}`,{method:'PUT',cookie,body:draftBody({question:'Updated question'})});
+  const updated=await f.call(`/drafts/${draftId}`,{method:'PUT',cookie,body:draftBody({question:'Updated question',expectedRevisionId:created.body.revisionId})});
   assert.equal(updated.status,200);
   assert.equal(updated.body.revisionNumber,2);
 
@@ -119,7 +119,7 @@ test('only the owner can edit or submit a draft',async t=>{
   const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
   const id=created.body.id;
 
-  assert.equal((await f.call(`/drafts/${id}`,{method:'PUT',cookie:co,body:draftBody({question:'Hijack'})})).status,403);
+  assert.equal((await f.call(`/drafts/${id}`,{method:'PUT',cookie:co,body:draftBody({question:'Hijack',expectedRevisionId:created.body.revisionId})})).status,403);
   assert.equal((await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:co,body:{}})).status,403);
   assert.equal((await f.call(`/drafts/${id}/withdraw`,{method:'POST',cookie:co,body:{}})).status,403);
 });
@@ -182,7 +182,7 @@ test('changes_requested returns draft to editable state',async t=>{
   assert.equal(draft.body.draft.status,'changes_requested');
 
   // Can edit and resubmit
-  assert.equal((await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Refined question'})})).status,200);
+  assert.equal((await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Refined question',expectedRevisionId:await currentRevision(f,id,cc)})})).status,200);
   const updated=await f.call(`/drafts/${id}`,{cookie:cc});
   assert.equal(updated.body.draft.status,'draft');
   assert.equal((await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}})).status,200);
@@ -200,7 +200,7 @@ test('rejected drafts cannot be submitted or edited',async t=>{
   await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'rejected',reason:'Inappropriate',expectedRevisionId:await currentRevision(f,id,cr)}});
 
   assert.equal((await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}})).status,409);
-  assert.equal((await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Try again'})})).status,409);
+  assert.equal((await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Try again',expectedRevisionId:await currentRevision(f,id,cc)})})).status,409);
 });
 
 test('editing an approved draft invalidates the approval',async t=>{
@@ -215,7 +215,7 @@ test('editing an approved draft invalidates the approval',async t=>{
   await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:await currentRevision(f,id,cr)}});
 
   // Edit the approved draft
-  const updated=await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Sneaky change'})});
+  const updated=await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Sneaky change',expectedRevisionId:await currentRevision(f,id,cc)})});
   assert.equal(updated.body.status,'draft'); // Reset to draft
   assert.equal(updated.body.revisionNumber,2);
 });
@@ -361,7 +361,7 @@ test('audit events are recorded for all draft actions',async t=>{
 
   const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
   const id=created.body.id;
-  await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Revised'})});
+  await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Revised',expectedRevisionId:created.body.revisionId})});
   await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
   await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:await currentRevision(f,id,cr)}});
 
@@ -401,6 +401,194 @@ test('reviewers can view any draft; non-owners without reviewer role cannot',asy
   assert.equal((await f.call(`/drafts/${id}`,{cookie:co})).status,403);
 });
 
+// --- Stale edit protection (expectedRevisionId) ---
+function editState(f,id){
+  return {
+    audits:f.db.prepare('SELECT COUNT(*) AS n FROM audit_events').get().n,
+    revisions:f.db.prepare('SELECT COUNT(*) AS n FROM draft_revisions').get().n,
+    draft:{...f.db.prepare('SELECT status,updated_at,current_revision_id FROM drafts WHERE id=?').get(id)},
+  };
+}
+
+test('two saves from the same base revision: exactly one wins, the other gets 409',async t=>{
+  const f=await fixture(t);
+  const cookie=await f.login(Keypair.random());
+  const created=await f.call('/drafts',{method:'POST',cookie,body:draftBody()});
+  const id=created.body.id,base=created.body.revisionId;
+
+  const [a,b]=await Promise.all([
+    f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({question:'Tab A',expectedRevisionId:base})}),
+    f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({question:'Tab B',expectedRevisionId:base})}),
+  ]);
+  assert.deepEqual([a.status,b.status].sort(),[200,409]);
+  const winner=a.status===200?'Tab A':'Tab B';
+  const loser=a.status===200?b:a;
+  assert.equal(loser.body.code,'revision_conflict');
+
+  const revisions=f.db.prepare('SELECT id,revision_number,question FROM draft_revisions WHERE draft_id=? ORDER BY revision_number').all(id);
+  assert.equal(revisions.length,2);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE draft_id=? AND action='revised'").get(id).n,1);
+  const current=f.db.prepare('SELECT r.question,r.revision_number FROM drafts d JOIN draft_revisions r ON r.id=d.current_revision_id WHERE d.id=?').get(id);
+  assert.equal(current.question,winner);
+  assert.equal(current.revision_number,2);
+  assert.equal(loser.body.currentRevisionId,revisions[1].id);
+  assert.equal(loser.body.currentRevisionNumber,2);
+});
+
+test('a stale save returns 409 with only the current revision id and number',async t=>{
+  const f=await fixture(t);
+  const cookie=await f.login(Keypair.random());
+  const created=await f.call('/drafts',{method:'POST',cookie,body:draftBody({yesRule:'private yes rule',sources:['private-source']})});
+  const id=created.body.id,rev1=created.body.revisionId;
+
+  const saveA=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({question:'Save A',expectedRevisionId:rev1})});
+  assert.equal(saveA.status,200);
+  assert.equal(saveA.body.revisionNumber,2);
+
+  const saveB=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({question:'Save B',expectedRevisionId:rev1})});
+  assert.equal(saveB.status,409);
+  assert.deepEqual(saveB.body,{error:'Draft has a newer revision; reload before editing',code:'revision_conflict',currentRevisionId:saveA.body.revisionId,currentRevisionNumber:2});
+
+  const get=await f.call(`/drafts/${id}`,{cookie});
+  assert.equal(get.body.revisions.length,2);
+  assert.equal(get.body.revisions[0].question,'Save A');
+});
+
+test('non-owners get 403 (never 409 or revision details); unknown drafts get 404',async t=>{
+  const f=await fixture(t);
+  const owner=await f.login(Keypair.random()),other=await f.login(Keypair.random());
+  const created=await f.call('/drafts',{method:'POST',cookie:owner,body:draftBody()});
+  const id=created.body.id,rev1=created.body.revisionId;
+  const saved=await f.call(`/drafts/${id}`,{method:'PUT',cookie:owner,body:draftBody({question:'Owner edit',expectedRevisionId:rev1})});
+
+  for(const expectedRevisionId of [rev1,saved.body.revisionId]){
+    const res=await f.call(`/drafts/${id}`,{method:'PUT',cookie:other,body:draftBody({question:'Hijack',expectedRevisionId})});
+    assert.equal(res.status,403);
+    assert.deepEqual(res.body,{error:'Only the owner can edit a draft'});
+  }
+  // Even when the draft is not editable, a non-owner learns nothing about its status
+  await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:owner,body:{}});
+  const locked=await f.call(`/drafts/${id}`,{method:'PUT',cookie:other,body:draftBody({question:'Hijack',expectedRevisionId:rev1})});
+  assert.equal(locked.status,403);
+  assert.deepEqual(locked.body,{error:'Only the owner can edit a draft'});
+
+  const missing=await f.call('/drafts/999999',{method:'PUT',cookie:owner,body:draftBody({expectedRevisionId:rev1})});
+  assert.equal(missing.status,404);
+  assert.deepEqual(missing.body,{error:'Draft not found'});
+});
+
+test('expectedRevisionId is required on PUT and rejected on POST',async t=>{
+  const f=await fixture(t);
+  const cookie=await f.login(Keypair.random());
+  const created=await f.call('/drafts',{method:'POST',cookie,body:draftBody()});
+  const id=created.body.id,rev1=created.body.revisionId;
+
+  const missing=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody()});
+  assert.equal(missing.status,400);
+  assert.deepEqual(missing.body,{error:'expectedRevisionId is required'});
+  for(const expectedRevisionId of [String(rev1),0,-1,1.5,null]){
+    const res=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({expectedRevisionId})});
+    assert.equal(res.status,400,`expectedRevisionId=${JSON.stringify(expectedRevisionId)}`);
+    assert.deepEqual(res.body,{error:'expectedRevisionId is required'});
+  }
+  const post=await f.call('/drafts',{method:'POST',cookie,body:draftBody({expectedRevisionId:rev1})});
+  assert.equal(post.status,400);
+  assert.deepEqual(post.body,{error:'Unexpected request fields'});
+});
+
+test('expectedRevisionId does not affect the revision content hash',async t=>{
+  const f=await fixture(t);
+  const cookie=await f.login(Keypair.random());
+  const created=await f.call('/drafts',{method:'POST',cookie,body:draftBody()});
+  const saved=await f.call(`/drafts/${created.body.id}`,{method:'PUT',cookie,body:draftBody({expectedRevisionId:created.body.revisionId})});
+  assert.equal(saved.status,200);
+  assert.equal(saved.body.contentHash,created.body.contentHash);
+});
+
+test('failed edits write no revision, no audit event and no draft change',async t=>{
+  const f=await fixture(t);
+  const owner=await f.login(Keypair.random()),other=await f.login(Keypair.random());
+  const created=await f.call('/drafts',{method:'POST',cookie:owner,body:draftBody()});
+  const id=created.body.id,rev1=created.body.revisionId;
+  await f.call(`/drafts/${id}`,{method:'PUT',cookie:owner,body:draftBody({question:'Saved',expectedRevisionId:rev1})});
+  const before=editState(f,id);
+  f.setClock(1500); // any write from here on would change updated_at
+
+  const attempts=[
+    [409,{cookie:owner,body:draftBody({question:'Stale',expectedRevisionId:rev1})}],
+    [403,{cookie:other,body:draftBody({question:'Hijack',expectedRevisionId:before.draft.current_revision_id})}],
+    [400,{cookie:owner,body:draftBody({question:'No base'})}],
+    [400,{cookie:owner,body:{question:'',tradingClose:2000,expectedRevisionId:before.draft.current_revision_id}}],
+  ];
+  for(const [status,options] of attempts){
+    const res=await f.call(`/drafts/${id}`,{method:'PUT',...options});
+    assert.equal(res.status,status);
+    assert.deepEqual(editState(f,id),before);
+  }
+});
+
+test('a successful edit invalidates approval; a stale edit leaves the approval in place',async t=>{
+  const admin=Keypair.random(),creator=Keypair.random(),reviewer=Keypair.random();
+  const f=await fixture(t,{superAdminWallets:[admin.publicKey()]});
+  const ca=await f.login(admin),cc=await f.login(creator),cr=await f.login(reviewer);
+  await f.call('/admin/reviewers',{method:'POST',cookie:ca,body:{wallet:reviewer.publicKey(),action:'add'}});
+
+  const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
+  const id=created.body.id,rev1=created.body.revisionId;
+  const rev2=(await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Reviewed text',expectedRevisionId:rev1})})).body.revisionId;
+  await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
+  assert.equal((await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:rev2}})).status,200);
+  const approvedRevisionId=f.db.prepare("SELECT revision_id FROM review_decisions WHERE draft_id=? AND decision='approved'").get(id).revision_id;
+  assert.equal(approvedRevisionId,rev2);
+
+  const stale=await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Stale change',expectedRevisionId:rev1})});
+  assert.equal(stale.status,409);
+  assert.equal(stale.body.code,'revision_conflict');
+  const afterStale=f.db.prepare('SELECT status,current_revision_id FROM drafts WHERE id=?').get(id);
+  assert.equal(afterStale.status,'approved');
+  assert.equal(afterStale.current_revision_id,approvedRevisionId);
+
+  const edit=await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Changed after approval',expectedRevisionId:rev2})});
+  assert.equal(edit.status,200);
+  assert.equal(edit.body.status,'draft');
+  const row=f.db.prepare('SELECT status,current_revision_id FROM drafts WHERE id=?').get(id);
+  assert.equal(row.status,'draft');
+  assert.notEqual(row.current_revision_id,approvedRevisionId);
+  assert.equal(row.current_revision_id,edit.body.revisionId);
+});
+
+test('retrying with currentRevisionId from the 409 body saves as a new revision',async t=>{
+  const f=await fixture(t);
+  const cookie=await f.login(Keypair.random());
+  const created=await f.call('/drafts',{method:'POST',cookie,body:draftBody()});
+  const id=created.body.id,rev1=created.body.revisionId;
+  await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({question:'Other tab',expectedRevisionId:rev1})});
+
+  const conflict=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({question:'My version',expectedRevisionId:rev1})});
+  assert.equal(conflict.status,409);
+  const retry=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({question:'My version',expectedRevisionId:conflict.body.currentRevisionId})});
+  assert.equal(retry.status,200);
+  assert.equal(retry.body.revisionNumber,3);
+
+  const get=await f.call(`/drafts/${id}`,{cookie});
+  assert.deepEqual(get.body.revisions.map(r=>[r.revisionNumber,r.question]),[[3,'My version'],[2,'Other tab'],[1,'Will BTC reach $100k by end of 2026?']]);
+  assert.deepEqual(f.db.prepare('SELECT action FROM audit_events WHERE draft_id=? ORDER BY id').all(id).map(a=>a.action),['created','revised','revised']);
+});
+
+test('an internal error during an edit returns a generic 500 and rolls back',async t=>{
+  const f=await fixture(t);
+  const cookie=await f.login(Keypair.random());
+  const created=await f.call('/drafts',{method:'POST',cookie,body:draftBody()});
+  const id=created.body.id;
+  const before=editState(f,id);
+  f.db.exec("CREATE TRIGGER fail_revision BEFORE INSERT ON draft_revisions BEGIN SELECT RAISE(ABORT,'internal detail'); END");
+  f.setClock(1500);
+
+  const res=await f.call(`/drafts/${id}`,{method:'PUT',cookie,body:draftBody({question:'Boom',expectedRevisionId:created.body.revisionId})});
+  assert.equal(res.status,500);
+  assert.deepEqual(res.body,{error:'Internal server error'});
+  assert.deepEqual(editState(f,id),before);
+});
 
 // --- Review revision binding ---
 async function submittedDraft(t,extraReviewers=0){
@@ -425,7 +613,7 @@ test('review of a stale revision returns 409 and writes no decision or audit row
   const {f,cc,cr,id,writes}=await submittedDraft(t);
   const seen=await currentRevision(f,id,cr); // reviewer opens revision 1
   await f.call(`/drafts/${id}/withdraw`,{method:'POST',cookie:cc,body:{}});
-  await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Changed after the reviewer loaded it'})});
+  await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Changed after the reviewer loaded it',expectedRevisionId:seen})});
   await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
   const stale=await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:seen}});
   assert.equal(stale.status,409);
@@ -626,7 +814,7 @@ test('W23: a different parameter set is rejected and requires a fresh approval o
   assert.equal(diffNested.status,409);
 
   // Edit the draft with new parameters -> invalidates previous intent and approval
-  const edited=await s.f.call(`/drafts/${s.draftId}`,{method:'PUT',cookie:s.cc,body:draftBody({question:'Updated BTC $120k target?',feeBps:50})});
+  const edited=await s.f.call(`/drafts/${s.draftId}`,{method:'PUT',cookie:s.cc,body:draftBody({question:'Updated BTC $120k target?',feeBps:50,expectedRevisionId:s.revisionId})});
   assert.equal(edited.status,200);
   assert.equal(edited.body.status,'draft');
 
