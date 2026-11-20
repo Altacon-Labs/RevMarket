@@ -329,7 +329,7 @@ test('AC1, AC2 & AC3: clean staging deployment works with AI disabled, survives 
   const approved = await callApi(port, `/drafts/${created.body.id}/review`, {
     method: 'POST',
     cookie: reviewerCookie,
-    body: {decision: 'approved', reason: 'Clear resolution rules'},
+    body: {decision: 'approved', reason: 'Clear resolution rules', expectedRevisionId: created.body.revisionId},
   });
   assert.equal(approved.status, 200);
 

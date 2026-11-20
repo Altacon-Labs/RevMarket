@@ -27,6 +27,9 @@ async function fixture(t,{superAdminWallets=[],rateLimit=1000}={}){
 function draftBody(overrides={}){
   return {question:'Will BTC reach $100k by end of 2026?',tradingClose:2000,...overrides};
 }
+async function currentRevision(f,id,cookie){
+  return (await f.call(`/drafts/${id}`,{cookie})).body.revisions[0].id;
+}
 
 // --- Schema migration tests ---
 test('schema v2 creates draft/review tables and v1 data survives migration',async t=>{
@@ -152,7 +155,7 @@ test('draft state machine: draft → submitted → approved → deployed lifecyc
   assert.equal(after.body.draft.status,'submitted');
 
   // Approve
-  const approval=await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',reason:'Looks good'}});
+  const approval=await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',reason:'Looks good',expectedRevisionId:await currentRevision(f,id,cr)}});
   assert.equal(approval.status,200);
   assert.equal(approval.body.status,'approved');
   assert.ok(approval.body.approvedParamsHash);
@@ -173,7 +176,7 @@ test('changes_requested returns draft to editable state',async t=>{
   const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
   const id=created.body.id;
   await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
-  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'changes_requested',reason:'Be more specific'}});
+  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'changes_requested',reason:'Be more specific',expectedRevisionId:await currentRevision(f,id,cr)}});
 
   const draft=await f.call(`/drafts/${id}`,{cookie:cc});
   assert.equal(draft.body.draft.status,'changes_requested');
@@ -194,7 +197,7 @@ test('rejected drafts cannot be submitted or edited',async t=>{
   const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
   const id=created.body.id;
   await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
-  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'rejected',reason:'Inappropriate'}});
+  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'rejected',reason:'Inappropriate',expectedRevisionId:await currentRevision(f,id,cr)}});
 
   assert.equal((await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}})).status,409);
   assert.equal((await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Try again'})})).status,409);
@@ -209,7 +212,7 @@ test('editing an approved draft invalidates the approval',async t=>{
   const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
   const id=created.body.id;
   await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
-  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved'}});
+  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:await currentRevision(f,id,cr)}});
 
   // Edit the approved draft
   const updated=await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Sneaky change'})});
@@ -246,7 +249,7 @@ test('reviewer cannot review their own draft (creator ≠ reviewer)',async t=>{
   const created=await f.call('/drafts',{method:'POST',cookie:cd,body:draftBody()});
   await f.call(`/drafts/${created.body.id}/submit`,{method:'POST',cookie:cd,body:{}});
 
-  const review=await f.call(`/drafts/${created.body.id}/review`,{method:'POST',cookie:cd,body:{decision:'approved'}});
+  const review=await f.call(`/drafts/${created.body.id}/review`,{method:'POST',cookie:cd,body:{decision:'approved',expectedRevisionId:await currentRevision(f,created.body.id,cd)}});
   assert.equal(review.status,403);
 });
 
@@ -268,7 +271,7 @@ test('only submitted drafts can be reviewed',async t=>{
 
   const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
   // Try to review a draft that hasn't been submitted
-  assert.equal((await f.call(`/drafts/${created.body.id}/review`,{method:'POST',cookie:cr,body:{decision:'approved'}})).status,409);
+  assert.equal((await f.call(`/drafts/${created.body.id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:await currentRevision(f,created.body.id,cr)}})).status,409);
 });
 
 // --- Reviewer role management tests ---
@@ -321,7 +324,7 @@ test('revoking a reviewer invalidates pending approvals',async t=>{
   const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
   const id=created.body.id;
   await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
-  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved'}});
+  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:await currentRevision(f,id,cr)}});
 
   // Revoke reviewer — should invalidate the approval
   await f.call('/admin/reviewers',{method:'POST',cookie:ca,body:{wallet:reviewer.publicKey(),action:'revoke'}});
@@ -360,7 +363,7 @@ test('audit events are recorded for all draft actions',async t=>{
   const id=created.body.id;
   await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Revised'})});
   await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
-  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved'}});
+  await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:await currentRevision(f,id,cr)}});
 
   const audits=f.db.prepare('SELECT action FROM audit_events WHERE draft_id=? ORDER BY id ASC').all(id);
   assert.deepEqual(audits.map(a=>a.action),['created','revised','submitted','reviewed']);
@@ -398,6 +401,81 @@ test('reviewers can view any draft; non-owners without reviewer role cannot',asy
   assert.equal((await f.call(`/drafts/${id}`,{cookie:co})).status,403);
 });
 
+
+// --- Review revision binding ---
+async function submittedDraft(t,extraReviewers=0){
+  const admin=Keypair.random(),creator=Keypair.random(),reviewers=Array.from({length:1+extraReviewers},()=>Keypair.random());
+  const f=await fixture(t,{superAdminWallets:[admin.publicKey()]});
+  const ca=await f.login(admin),cc=await f.login(creator),crs=[];
+  for(const r of reviewers){await f.call('/admin/reviewers',{method:'POST',cookie:ca,body:{wallet:r.publicKey(),action:'add'}});crs.push(await f.login(r));}
+  const id=(await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()})).body.id;
+  await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
+  const writes=()=>({decisions:f.db.prepare('SELECT COUNT(*) AS n FROM review_decisions WHERE draft_id=?').get(id).n,audits:f.db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE draft_id=? AND action='reviewed'").get(id).n});
+  return {f,cc,cr:crs[0],crs,id,writes};
+}
+
+test('review requires expectedRevisionId',async t=>{
+  const {f,cr,id,writes}=await submittedDraft(t);
+  assert.equal((await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved'}})).status,400);
+  assert.equal((await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:String(await currentRevision(f,id,cr))}})).status,400);
+  assert.deepEqual(writes(),{decisions:0,audits:0});
+});
+
+test('review of a stale revision returns 409 and writes no decision or audit row',async t=>{
+  const {f,cc,cr,id,writes}=await submittedDraft(t);
+  const seen=await currentRevision(f,id,cr); // reviewer opens revision 1
+  await f.call(`/drafts/${id}/withdraw`,{method:'POST',cookie:cc,body:{}});
+  await f.call(`/drafts/${id}`,{method:'PUT',cookie:cc,body:draftBody({question:'Changed after the reviewer loaded it'})});
+  await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
+  const stale=await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:seen}});
+  assert.equal(stale.status,409);
+  assert.deepEqual(writes(),{decisions:0,audits:0});
+  assert.equal((await f.call(`/drafts/${id}`,{cookie:cc})).body.draft.status,'submitted');
+  const fresh=await currentRevision(f,id,cr);
+  assert.notEqual(fresh,seen);
+  assert.equal((await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:fresh}})).status,200);
+  assert.deepEqual(writes(),{decisions:1,audits:1});
+});
+
+test('review of a draft that is no longer submitted returns 409 and writes nothing',async t=>{
+  const {f,cc,cr,id,writes}=await submittedDraft(t);
+  const seen=await currentRevision(f,id,cr);
+  await f.call(`/drafts/${id}/withdraw`,{method:'POST',cookie:cc,body:{}});
+  assert.equal((await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'rejected',expectedRevisionId:seen}})).status,409);
+  assert.deepEqual(writes(),{decisions:0,audits:0});
+});
+
+test('two competing reviews of the same revision record exactly one decision',async t=>{
+  const {f,cc,crs,id,writes}=await submittedDraft(t,1);
+  const rev=await currentRevision(f,id,crs[0]);
+  const results=await Promise.all([
+    f.call(`/drafts/${id}/review`,{method:'POST',cookie:crs[0],body:{decision:'approved',expectedRevisionId:rev}}),
+    f.call(`/drafts/${id}/review`,{method:'POST',cookie:crs[1],body:{decision:'rejected',reason:'Too vague',expectedRevisionId:rev}}),
+  ]);
+  assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
+  assert.deepEqual(writes(),{decisions:1,audits:1});
+  const winner=results.find(r=>r.status===200).body.status;
+  const draft=await f.call(`/drafts/${id}`,{cookie:cc});
+  assert.equal(draft.body.draft.status,winner);
+  assert.equal(draft.body.reviews.length,1);
+  assert.equal(draft.body.reviews[0].decision,winner);
+});
+
+test('review reason and accepted revision remain visible after reload',async t=>{
+  const {f,cc,cr,id}=await submittedDraft(t);
+  const rev=await currentRevision(f,id,cr);
+  assert.equal((await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'changes_requested',reason:'Name the price source',expectedRevisionId:rev}})).status,200);
+  for(const cookie of [cc,cr]){
+    const reloaded=await f.call(`/drafts/${id}`,{cookie});
+    assert.equal(reloaded.body.reviews.length,1);
+    assert.equal(reloaded.body.reviews[0].reason,'Name the price source');
+    assert.equal(reloaded.body.reviews[0].revisionId,rev);
+    assert.equal(reloaded.body.reviews[0].decision,'changes_requested');
+  }
+  const audit=JSON.parse(f.db.prepare("SELECT detail_json FROM audit_events WHERE draft_id=? AND action='reviewed'").get(id).detail_json);
+  assert.equal(audit.revisionId,rev);
+});
+
 // --- Publication intent tests (W23) ---
 async function setupApprovedDraft(t,{bodyOverrides={},expiry=5000}={}){
   const admin=Keypair.random(),creator=Keypair.random(),reviewer=Keypair.random(),rando=Keypair.random();
@@ -424,7 +502,7 @@ async function setupApprovedDraft(t,{bodyOverrides={},expiry=5000}={}){
   const created=await f.call('/drafts',{method:'POST',cookie:cc,body});
   const draftId=created.body.id;
   await f.call(`/drafts/${draftId}/submit`,{method:'POST',cookie:cc,body:{}});
-  const approval=await f.call(`/drafts/${draftId}/review`,{method:'POST',cookie:cr,body:{decision:'approved',reason:'Approved for intent',expiry}});
+  const approval=await f.call(`/drafts/${draftId}/review`,{method:'POST',cookie:cr,body:{decision:'approved',reason:'Approved for intent',expiry,expectedRevisionId:created.body.revisionId}});
   assert.equal(approval.status,200);
   return {f,admin,creator,reviewer,rando,ca,cc,cr,co,draftId,revisionId:created.body.revisionId,contentHash:created.body.contentHash,approval:approval.body};
 }
@@ -563,7 +641,7 @@ test('W23: a different parameter set is rejected and requires a fresh approval o
   assert.equal((await s.f.call(`/drafts/${s.draftId}/publication-intents`,{method:'POST',cookie:s.cc,body:{}})).status,409);
 
   // Fresh approval on revision 2 allows a new intent with the updated parameter set
-  await s.f.call(`/drafts/${s.draftId}/review`,{method:'POST',cookie:s.cr,body:{decision:'approved',reason:'Re-approved rev 2',expiry:6000}});
+  await s.f.call(`/drafts/${s.draftId}/review`,{method:'POST',cookie:s.cr,body:{decision:'approved',reason:'Re-approved rev 2',expiry:6000,expectedRevisionId:await currentRevision(s.f,s.draftId,s.cr)}});
   const second=await s.f.call(`/drafts/${s.draftId}/publication-intents`,{method:'POST',cookie:s.cc,body:{}});
   assert.equal(second.status,201);
   assert.notEqual(second.body.intent.id,first.body.intent.id);

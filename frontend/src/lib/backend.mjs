@@ -615,6 +615,10 @@ export async function createDraft(draftData = {}, options = {}) {
   return await api('/drafts', {method: 'POST', body: {...draftData, collateral}});
 }
 
+export async function submitReview(draftId, {decision, reason, expectedRevisionId}) {
+  return await api(`/drafts/${draftId}/review`, {method: 'POST', body: {decision, reason, expectedRevisionId}});
+}
+
 export async function updateDraft(draftId, draftData = {}, options = {}) {
   const collateral = draftData.collateral !== undefined
     ? pinCollateralForDraft(draftData.collateral, options)

@@ -432,15 +432,18 @@ export function createApi({db,appOrigin='http://127.0.0.1:5173',now=()=>Math.flo
           const wallet=session(req);
           const reviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
           if(!reviewer)throw new ApiError(403,'Active reviewer role required');
-          const body=await bodyOf(req);object(body,['decision','reason','expiry']);
+          const body=await bodyOf(req);object(body,['decision','reason','expiry','expectedRevisionId']);
           if(!['changes_requested','rejected','approved'].includes(body.decision))throw new ApiError(400,'Decision must be changes_requested, rejected, or approved');
-          const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
-          if(!draft)throw new ApiError(404,'Draft not found');
-          if(draft.status!=='submitted')throw new ApiError(409,'Only submitted drafts can be reviewed');
-          if(draft.owner_wallet===wallet)throw new ApiError(403,'Reviewers cannot review their own drafts');
-          const revision=db.prepare('SELECT * FROM draft_revisions WHERE id=?').get(draft.current_revision_id);
+          if(!Number.isSafeInteger(body.expectedRevisionId)||body.expectedRevisionId<=0)throw new ApiError(400,'expectedRevisionId is required');
           db.exec('BEGIN IMMEDIATE');
           try{
+            // Read state inside the write lock so the checks and the decision are atomic
+            const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
+            if(!draft)throw new ApiError(404,'Draft not found');
+            if(draft.status!=='submitted')throw new ApiError(409,'Only submitted drafts can be reviewed');
+            if(draft.owner_wallet===wallet)throw new ApiError(403,'Reviewers cannot review their own drafts');
+            if(draft.current_revision_id!==body.expectedRevisionId)throw new ApiError(409,'Draft has a newer revision; reload before reviewing');
+            const revision=db.prepare('SELECT * FROM draft_revisions WHERE id=?').get(draft.current_revision_id);
             let approvedHash=null,expiry=null;
             if(body.decision==='approved'){
               approvedHash=revision.content_hash;
