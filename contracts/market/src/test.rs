@@ -1,6 +1,7 @@
 extern crate std;
 use super::*;
-use soroban_sdk::testutils::{Address as _, Ledger};
+use soroban_sdk::testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Events, Ledger};
+use soroban_sdk::{vec, IntoVal};
 
 struct Fixture { e: Env, id: Address, token: Address, resolver: Address, a: Address, b: Address }
 impl Fixture {
@@ -140,4 +141,54 @@ fn invalid_creation_and_missing_market() {
     assert!(c.try_create(&f.a,&String::from_str(&f.e,"x"),&String::from_str(&f.e,""),&String::from_str(&f.e,"https://example.com/market.jpg"),&Kind::Event,&100).is_err());
     assert!(c.try_create(&f.a,&String::from_str(&f.e,"x"),&String::from_str(&f.e,""),&String::from_str(&f.e,""),&Kind::Price(symbol_short!("BAD"),100),&200).is_err());
     assert!(c.try_create(&f.a,&String::from_str(&f.e,"x"),&String::from_str(&f.e,""),&String::from_str(&f.e,""),&Kind::Event,&200).is_err());
+}
+#[test]
+fn delegated_claim_pays_owner_with_keeper_auth_only() {
+    let f=Fixture::new(); let c=f.client(); let id=f.create(Kind::Event); let keeper=Address::generate(&f.e);
+    c.grant_claimer(&f.a,&keeper,&(100+MAX_PERMIT));
+    assert_eq!(c.get_claimer(&f.a),Some(ClaimPermit{keeper:keeper.clone(),expires_at:100+MAX_PERMIT}));
+    c.predict(&f.a,&id,&0,&100); c.predict(&f.b,&id,&1,&300); f.at(200); c.request(&id); c.settle_event(&id,&0,&9000,&f.hash());
+    assert_eq!(c.claim_for(&keeper,&f.a,&id),400);
+    assert_eq!(f.e.auths(),std::vec![(keeper.clone(),AuthorizedInvocation{function:AuthorizedFunction::Contract((f.id.clone(),Symbol::new(&f.e,"claim_for"),(keeper.clone(),f.a.clone(),id).into_val(&f.e))),sub_invocations:std::vec![]})]);
+    assert_eq!(f.balance(&f.a),1300); assert_eq!(f.balance(&keeper),0); assert_eq!(f.balance(&f.id),0);
+    assert_eq!(c.try_claim_for(&keeper,&f.a,&id),Err(Ok(Error::Nothing.into()))); assert_eq!(c.try_claim(&f.a,&id),Err(Ok(Error::Nothing.into())));
+    assert_eq!(c.try_claim_for(&keeper,&f.b,&id),Err(Ok(Error::Denied.into())));
+}
+#[test]
+fn delegated_claim_fails_closed_for_missing_wrong_revoked_and_expired_permits() {
+    let f=Fixture::new(); let c=f.client(); let id=f.create(Kind::Event); let keeper=Address::generate(&f.e); let other=Address::generate(&f.e);
+    c.predict(&f.a,&id,&0,&100); f.at(201+GRACE);
+    assert_eq!(c.try_claim_for(&keeper,&f.a,&id),Err(Ok(Error::Denied.into())));
+    let exp=201+GRACE+10; c.grant_claimer(&f.a,&keeper,&exp);
+    assert_eq!(c.try_claim_for(&other,&f.a,&id),Err(Ok(Error::Denied.into())));
+    assert_eq!(c.try_claim_for(&f.a,&f.a,&id),Err(Ok(Error::Denied.into())));
+    c.revoke_claimer(&f.a); assert_eq!(c.get_claimer(&f.a),None);
+    assert_eq!(c.try_claim_for(&keeper,&f.a,&id),Err(Ok(Error::Denied.into())));
+    c.grant_claimer(&f.a,&keeper,&exp); f.at(exp);
+    assert_eq!(c.try_claim_for(&keeper,&f.a,&id),Err(Ok(Error::Denied.into())));
+    f.at(exp-1); assert_eq!(c.claim_for(&keeper,&f.a,&id),100); // timeout refund still goes to owner
+    assert_eq!(f.balance(&f.a),1000); assert_eq!(f.balance(&keeper),0);
+}
+#[test]
+fn grant_bounds_events_and_loser_rejection() {
+    let f=Fixture::new(); let c=f.client(); let id=f.create(Kind::Event); let keeper=Address::generate(&f.e);
+    assert_eq!(c.try_grant_claimer(&f.a,&keeper,&100),Err(Ok(Error::Invalid.into())));
+    assert_eq!(c.try_grant_claimer(&f.a,&keeper,&(101+MAX_PERMIT)),Err(Ok(Error::Invalid.into())));
+    assert_eq!(c.try_grant_claimer(&f.a,&f.a,&200),Err(Ok(Error::Invalid.into())));
+    c.grant_claimer(&f.a,&keeper,&300);
+    assert_eq!(f.e.events().all(),vec![&f.e,(f.id.clone(),vec![&f.e,symbol_short!("grant").into_val(&f.e),f.a.into_val(&f.e)],(keeper.clone(),300u64).into_val(&f.e))]);
+    c.revoke_claimer(&f.a);
+    assert_eq!(f.e.events().all(),vec![&f.e,(f.id.clone(),vec![&f.e,symbol_short!("revoke").into_val(&f.e),f.a.into_val(&f.e)],().into_val(&f.e))]);
+    c.grant_claimer(&f.a,&keeper,&300);
+    c.predict(&f.a,&id,&1,&100); c.predict(&f.b,&id,&0,&100); f.at(200); c.request(&id); c.settle_event(&id,&0,&9000,&f.hash());
+    assert_eq!(c.try_claim_for(&keeper,&f.a,&id),Err(Ok(Error::Nothing.into()))); assert_eq!(f.balance(&f.id),200);
+}
+#[test]
+fn permit_auth_enforced_without_mocks() {
+    let f=Fixture::new(); let c=f.client(); let id=f.create(Kind::Event); let keeper=Address::generate(&f.e);
+    c.predict(&f.a,&id,&0,&100); c.grant_claimer(&f.a,&keeper,&300); f.at(201+GRACE); f.e.mock_auths(&[]);
+    assert!(c.try_grant_claimer(&f.a,&keeper,&400).is_err());
+    assert!(c.try_revoke_claimer(&f.a).is_err());
+    assert!(c.try_claim_for(&keeper,&f.a,&id).is_err());
+    assert_eq!(c.get_claimer(&f.a).unwrap().keeper,keeper); assert_eq!(f.balance(&f.id),100);
 }

@@ -14,6 +14,10 @@ The hand-written client encoder is `shared/stellar.mjs`. Integers are never conv
 | `settle_event` | id, outcome u32, confidence u32, evidence BytesN<32> | Immutable resolver signs; only Event kind |
 | `settle_price` | id, price i128, evidence BytesN<32> | Immutable resolver signs; contract applies strict `price > target` |
 | `claim` | user Address, id | User signs; transfers winnings/refund to that address; returns i128 payout |
+| `grant_claimer` | owner Address, keeper Address, expires_at u64 | Owner signs; stores one claim-only permit per owner, replacing any previous one. Requires `keeper != owner` and `now < expires_at <= now + 2_592_000` (30 days) |
+| `revoke_claimer` | owner Address | Owner signs; removes the permit (no-op if none) |
+| `get_claimer` | owner Address | Returns optional ClaimPermit as stored; an expired permit is still returned until revoked or replaced |
+| `claim_for` | keeper Address, owner Address, id | Keeper signs; requires a stored permit for that keeper with `now < expires_at`; pays the owner exactly as `claim` would; returns i128 payout |
 | `get_market` | id | Returns Market; rejects unknown ID |
 | `get_position` | id, user Address | Returns optional Position |
 | `count` | none | Returns next market ID |
@@ -27,13 +31,13 @@ YES = 0, NO = 1. New predictions require `now < close`; requests/settlements all
 
 Deposits are capped at a combined `10^18` base units per market. Payout numerator is bounded by `10^36`, below signed 128-bit maximum. Each winner can claim once. Total integer payouts are at most deposits; rounding dust remains. With no winning stake the whole market refunds, avoiding an irrecoverable losing-only pool. Different markets have independent accounting even though they share the token balance.
 
-Error codes: Missing=1, Invalid=2, Closed=3, Duplicate=4, NotReady=5, Nothing=6, Overflow=7. Host authorization/token/storage failures may produce host errors rather than those contract codes. All failures are atomic, including token transfer failures.
+Error codes: Missing=1, Invalid=2, Closed=3, Duplicate=4, NotReady=5, Nothing=6, Overflow=7, Denied=8 (missing, expired, revoked or wrong-keeper claim permit). Host authorization/token/storage failures may produce host errors rather than those contract codes. All failures are atomic, including token transfer failures.
 
-Events: `created`, `predict`, `request`, `settled`, `claimed`, with market ID as a topic. The current worker uses on-chain state polling rather than event indexing; events are retained for future indexing. The SDK's legacy event publishing API currently emits deprecation warnings, without build failures.
+Events: `created`, `predict`, `request`, `settled`, `claimed`, with market ID as a topic, plus `grant` and `revoke` with the owner address as a topic. The current worker uses on-chain state polling rather than event indexing; events are retained for future indexing. The SDK's legacy event publishing API currently emits deprecation warnings, without build failures.
 
 ## Exact current signatures
 
-The implicit first argument is `Env`; it is supplied by Soroban, not encoded by clients. All methods except the listed returning methods return unit. The private Rust helpers `settle` and `settle_inner` are not exported contract methods.
+The implicit first argument is `Env`; it is supplied by Soroban, not encoded by clients. All methods except the listed returning methods return unit. The private Rust helpers `settle`, `settle_inner` and `claim_inner` are not exported contract methods.
 
 ```rust
 __constructor(token: Address, resolver: Address)
@@ -44,6 +48,10 @@ request(id: u32)
 settle_event(id: u32, outcome: u32, confidence: u32, evidence: BytesN<32>)
 settle_price(id: u32, price: i128, evidence: BytesN<32>)
 claim(user: Address, id: u32) -> i128
+grant_claimer(owner: Address, keeper: Address, expires_at: u64)
+revoke_claimer(owner: Address)
+get_claimer(owner: Address) -> Option<ClaimPermit>
+claim_for(keeper: Address, owner: Address, id: u32) -> i128
 get_market(id: u32) -> Market
 get_position(id: u32, user: Address) -> Option<Position>
 count() -> u32
@@ -72,6 +80,7 @@ struct Market {
     evidence: BytesN<32>,
 }
 struct Position { amount: i128, side: u32, claimed: bool }
+struct ClaimPermit { keeper: Address, expires_at: u64 }
 ```
 
 `outcome=0`, `confidence=0` and zero evidence are creation defaults, not an early YES resolution. Interpret outcome only after terminal settlement. Refundable status can retain a resolved outcome when no winning stake existed. Amounts use exact signed 128-bit integers but accepted stakes and price values must be positive. String limits are SDK byte lengths; frontend character counts are not a substitute for simulation.
@@ -85,6 +94,8 @@ struct Position { amount: i128, side: u32, claimed: bool }
 | `('request', id)` | `closes_at` |
 | `('settled', id)` | `(outcome, confidence)` |
 | `('claimed', id)` | `(user, payout)` |
+| `('grant', owner)` | `(keeper, expires_at)` |
+| `('revoke', owner)` | `()` |
 
 No dedicated timeout-refund event is emitted when claim changes status; observe claim and reconcile state. The settled event omits the evidence digest, which must be read from market state. No event proves factual evidence correctness.
 
@@ -179,7 +190,7 @@ Require factory-authenticated child initialization and atomic version/params val
 
 Proposed events: MarketCreated(version,address,creator,reviewer,params_hash,wasm_hash), Split, Merge, SharesTransferred, Trade(side,direction,input,output,fee,reserves), LiquidityAdded/Removed, ResolutionRequested, ResolutionFinalized(outcome,evidence,policy_hash), Redeemed, CreationPaused, CreationNonceInvalidated(creator,nonce) and ReviewerRoleChanged(address,enabled,epoch). Emit user/address, integer amounts, and versioned schemas sufficient for reconciliation. A later dispute adapter needs additional methods/events; it is outside this trusted-policy interface.
 
-No API above grants automated claims. A01's claim-only opt-in/expiry/revocation work is a separate proposal and must not be confused with v2 trading consent or backend sign-in. Keep legacy claims user-authorized until a separately reviewed on-chain permission exists.
+No API above grants automated claims. The v1 claim-only permit is described below and must not be confused with v2 trading consent or backend sign-in.
 
 ## Proposed authoring and review interfaces — backend, not current APIs
 
@@ -205,3 +216,14 @@ Off-chain withdrawal prevents service publication but cannot revoke already-issu
 Backend login proves session identity only. Review decisions do not contain private keys. Transaction authorization is collected separately from backend sign-in. Administrative backend routes need explicit access controls, audit logs and chain-role reconciliation; the existing network-status allowlist does not implement factory reviewer management.
 
 Draft requests use exact integer strings for chain amounts and schema-validated timestamps. Return revision-conflict errors for stale writes and idempotent results for repeated publication requests. Log state transitions and chain hashes without cookies, signing material, provider secrets or private prompt contents. AI responses include schema version, originating revision, suggested fields, source candidates, ambiguity warnings and duplicate candidates; they cannot contain executable commands or deployment approval.
+
+## Claim-only permits (v1, A01)
+
+An owner can opt in to let one keeper call `claim_for` on their behalf. The keeper can only trigger the existing claim logic for the owner's own position. The payout always goes to the owner, and `claim_for` has no recipient argument. A permit grants nothing else: no betting, transfers, settlement or revocation. Without a permit, `claim` works exactly as before.
+
+- Only the owner's signature can create or remove a permit. The resolver and backend have no path to grant one.
+- The permit is read and checked on every `claim_for` call. Missing, revoked, expired (`now >= expires_at`) or wrong-keeper permits fail with `Denied` before any state change.
+- Expiry is bounded to at most 30 days after the grant. The permit lives in persistent storage, and its TTL is extended to the contract's standard TTL (about 60 days at 5-second ledgers) on grant, so a live permit is not archived before it expires. If the entry is ever archived, the call cannot read it and fails rather than inferring consent. Re-grant to renew.
+- Only the keeper's authorization is required. The token transfer is from the contract to the owner, so no nested owner authorization is involved.
+
+Deployment: this is an additive ABI change (new methods, a new `Key::ClaimPermit` storage variant, a new `ClaimPermit` type and error code 8). Existing methods and storage are unchanged. Soroban instances run the WASM they were deployed with, so permits are only available on a new deployment of the rebuilt WASM. Already-deployed instances keep manual `claim` and do not gain these methods.
