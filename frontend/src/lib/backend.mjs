@@ -605,8 +605,35 @@ export async function reportActivity(wallet, action, txHash) {
   }
 }
 
-export async function requestAiAssist(draftId) {
-  return await api(`/drafts/${draftId}/ai-assist`, {method: 'POST', body: {}});
+export async function requestAiAssist(draftId, expectedRevisionId) {
+  const response = await api(`/drafts/${draftId}/ai-assist`, {
+    method: 'POST',
+    body: {expectedRevisionId},
+  });
+  const source = response.sourceRevision;
+  if (
+    !source ||
+    !Number.isSafeInteger(source.draftId) ||
+    !Number.isSafeInteger(source.revisionId) ||
+    !Number.isSafeInteger(source.revisionNumber) ||
+    typeof source.contentHash !== 'string'
+  ) {
+    throw new Error('AI assistance returned an invalid source revision.');
+  }
+  return response;
+}
+
+export function isAiAssistResultStale(result, currentDraft, currentForm) {
+  const {sourceRevision, expectedDraftId, expectedRevisionId, sourceForm} = result;
+  return (
+    sourceRevision.draftId !== expectedDraftId ||
+    sourceRevision.revisionId !== expectedRevisionId ||
+    currentDraft?.draftId !== expectedDraftId ||
+    currentDraft?.revisionId !== expectedRevisionId ||
+    currentForm.question !== sourceForm.question ||
+    currentForm.category !== sourceForm.category ||
+    currentForm.collateral !== sourceForm.collateral
+  );
 }
 
 export async function createDraft(draftData = {}, options = {}) {
