@@ -3,6 +3,7 @@ import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 import {
   buildDraftReviewSummary,
   createDraft,
+  isAiAssistResultStale,
   pinCollateralForDraft,
   requestAiAssist,
   resolveCollateralIdentity,
@@ -130,6 +131,12 @@ export default function CreateMarketModal({
   const [savedDraft, setSavedDraft] = useState(null);
   const [revisionConflict, setRevisionConflict] = useState(null);
 
+  const aiSuggestionsStale = aiSuggestions && isAiAssistResultStale(
+    aiSuggestions,
+    savedDraft,
+    {question: question.trim(), category: kind, collateral: selectedCollateral},
+  );
+
   const resolvedCollateral = resolveCollateralIdentity(selectedCollateral, {
     fixtureMode,
     allowlist: collateralAllowlist,
@@ -156,6 +163,7 @@ export default function CreateMarketModal({
       return;
     }
     setError('');
+    setAiSuggestions(null);
     let pinnedCollateral;
     try {
       pinnedCollateral = pinCollateralForDraft(selectedCollateral, {
@@ -175,6 +183,11 @@ export default function CreateMarketModal({
         category: kind,
         tradingClose: closesAt,
         collateral: pinnedCollateral,
+      };
+      const sourceForm = {
+        question: draftData.question,
+        category: draftData.category,
+        collateral: draftData.collateral,
       };
       const collateralOptions = {
         fixtureMode,
@@ -206,8 +219,13 @@ export default function CreateMarketModal({
         category: kind,
         collateral: pinnedCollateral,
       });
-      const res = await requestAiAssist(next.draftId);
-      setAiSuggestions(res.suggestions);
+      const res = await requestAiAssist(next.draftId, next.revisionId);
+      setAiSuggestions({
+        ...res,
+        expectedDraftId: next.draftId,
+        expectedRevisionId: next.revisionId,
+        sourceForm,
+      });
     } catch (err) {
       // A stale edit keeps the typed text untouched and waits for an explicit choice; nothing retries automatically.
       if (err.status === 409 && err.body?.code === 'revision_conflict') {
@@ -223,6 +241,7 @@ export default function CreateMarketModal({
   function applySuggestion(suggestedQ) {
     if (suggestedQ) {
       setQuestion(suggestedQ);
+      setAiSuggestions(null);
     }
   }
 
@@ -341,16 +360,27 @@ export default function CreateMarketModal({
             <p><PhosphorIcon name="info" size={14} /> This draft was changed in another tab or window (now revision {revisionConflict.currentRevisionNumber}). Your text is still here; nothing was overwritten.</p>
             <button type="button" className="button button-secondary" disabled={aiLoading || busy} onClick={() => handleAiAssist(revisionConflict.currentRevisionId)}>Save my version as a new revision</button>
           </div>}
-          {aiSuggestions && <div className="form-note" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
-            <p><strong>AI Suggestions:</strong></p>
-            {aiSuggestions.suggestedQuestion && <p style={{cursor: 'pointer', textDecoration: 'underline'}} onClick={() => applySuggestion(aiSuggestions.suggestedQuestion)}>
-              Suggested: {aiSuggestions.suggestedQuestion} (click to apply)
+          {aiSuggestions && <div className="form-note" role="status" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
+            <p><strong>AI Suggestions · draft revision #{aiSuggestions.sourceRevision.revisionNumber}</strong></p>
+            {aiSuggestionsStale && <p className="form-error">
+              These suggestions were generated for this revision, but the draft or form has changed since. They cannot be applied to the current values.
             </p>}
-            {aiSuggestions.ambiguityFlags?.length > 0 && <p style={{color: '#ffaa00'}}>
-              Ambiguity note: {aiSuggestions.ambiguityFlags.join('; ')}
+            {aiSuggestions.suggestions.suggestedQuestion && <div>
+              <p>Suggested: {aiSuggestions.suggestions.suggestedQuestion}</p>
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={aiSuggestionsStale}
+                onClick={() => applySuggestion(aiSuggestions.suggestions.suggestedQuestion)}
+              >
+                Apply suggestion
+              </button>
+            </div>}
+            {aiSuggestions.suggestions.ambiguityFlags?.length > 0 && <p style={{color: '#ffaa00'}}>
+              Ambiguity note: {aiSuggestions.suggestions.ambiguityFlags.join('; ')}
             </p>}
-            {aiSuggestions.suggestedSources?.length > 0 && <p>
-              Sources: {aiSuggestions.suggestedSources.join(', ')}
+            {aiSuggestions.suggestions.suggestedSources?.length > 0 && <p>
+              Sources: {aiSuggestions.suggestions.suggestedSources.join(', ')}
             </p>}
           </div>}
         </div>}
