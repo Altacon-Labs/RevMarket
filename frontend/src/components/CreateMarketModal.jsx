@@ -239,7 +239,7 @@ export default function CreateMarketModal({
   }
 
   function applySuggestion(suggestedQ) {
-    if (suggestedQ) {
+    if (suggestedQ && !aiSuggestionsStale) {
       setQuestion(suggestedQ);
       setAiSuggestions(null);
     }
