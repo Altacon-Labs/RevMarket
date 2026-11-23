@@ -1,5 +1,6 @@
 import {createServer} from 'node:http';
 import {createHash,randomBytes} from 'node:crypto';
+import {correlationId,writeStructuredLog} from '../shared/observability.mjs';
 import {File} from 'node:buffer';
 import {Keypair,Networks,StrKey} from '@stellar/stellar-sdk';
 import {DEFAULT_STALE_AFTER_SECONDS,queryVerifiedWalletActivity,validateVerifiedActivityConfig} from './verified-activity.mjs';
@@ -320,8 +321,17 @@ export function createApi(options={}){
     return wallet;
   };
   const server=createServer(async(req,res)=>{
+    const startedAt=Date.now();
+    const requestId=correlationId(req.headers['x-request-id']);
+    res.setHeader('X-Request-Id',requestId);
+    res.once('finish',()=>{
+      const path=(req.url||'/').split('?',1)[0];
+      const route=path.replace(/^\/api\/drafts\/[^/]+(?=\/|$)/,'/api/drafts/{id}').replace(/^\/api\/publication-intents\/[^/]+$/,'/api/publication-intents/{id}');
+      const reasonCode=res.statusCode===503?'database_unavailable':res.statusCode>=500?'request_failed':res.statusCode===429?'rate_limited':res.statusCode>=400?'invalid_request':'request_completed';
+      writeStructuredLog(res.statusCode>=500?'error':'info',{event:'http_request',correlationId:requestId,reasonCode,status:res.statusCode,durationMs:Date.now()-startedAt,method:req.method,route});
+    });
     let rateHeaders={};
-    const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'",'Referrer-Policy':'no-referrer'};
+    const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'",'Referrer-Policy':'no-referrer','X-Request-Id':requestId};
     const send=(status,data,extra={})=>{res.writeHead(status,{...headers,...rateHeaders,...extra});res.end(JSON.stringify(data));};
     try{
       if(req.headers.origin && req.headers.origin!==appOrigin)throw new ApiError(403,'Origin not allowed');
@@ -329,12 +339,14 @@ export function createApi(options={}){
       const time=now();
       const url=new URL(req.url,'http://localhost');
       const route=req.method+' '+url.pathname;
+      if(route==='GET /api/live')return send(200,{status:'ok',service:'revmarket-api'});
       const limitDecision=rateLimiter.checkRequest({req,method:req.method,pathname:url.pathname,resolveWallet:peekSessionWallet,time});
       rateHeaders=limitDecision.headers;
       cleanup();
-      if(route==='GET /api/health'){
+      if(route==='GET /api/ready'||route==='GET /api/health'){
         db.prepare('SELECT 1').get();
-        return send(200,{status:'ok',service:'revmarket-api',version:1,network:'testnet',automationEnabled:false});
+        if(route==='GET /api/health')return send(200,{status:'ok',service:'revmarket-api',version:1,network:'testnet',automationEnabled:false});
+        return send(200,{status:'ready',service:'revmarket-api'});
       }
       if(route==='POST /api/auth/challenge'){
         const body=await bodyOf(req);object(body,['wallet']);
@@ -728,6 +740,7 @@ export function createApi(options={}){
       // Never echo bodies, cookies, signatures or internal database errors.
       if(!res.headersSent){
         if(e instanceof RateLimitError)send(e.status,e.toBody(),e.toHeaders());
+        else if(['GET /api/ready','GET /api/health'].includes(req.method+' '+new URL(req.url,'http://localhost').pathname))send(503,{status:'not_ready',service:'revmarket-api'});
         else send(e.status||500,e.status?{error:e.message,...e.extra}:{error:'Internal server error'},e.status===413?{'Connection':'close'}:{});
       }
       else res.end();

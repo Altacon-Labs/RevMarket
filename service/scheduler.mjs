@@ -1,7 +1,11 @@
-export async function pollDueMarkets({store, network, contract, count, process, now = () => Math.floor(Date.now()/1000), batchSize = 25, onError = () => {}}) {
+import {randomUUID} from 'node:crypto';
+
+export async function pollDueMarkets({store, network, contract, count, process, now = () => Math.floor(Date.now()/1000), batchSize = 25, onError = () => {}, onAttempt = () => {}}) {
   for (let market = 0; market < count; market++) store.ensureJob(network, contract, market, now());
   const due = store.dueJobs(network, contract, now(), batchSize);
   for (const job of due) {
+    const attemptId=randomUUID();
+    onAttempt({event:'worker_attempt_started',correlationId:attemptId,marketId:job.market,attempt:job.failures+1,reasonCode:'worker_attempt_started'});
     let marketInfo;
     try {
       const result = await process(job.market, info => {
@@ -17,13 +21,15 @@ export async function pollDueMarkets({store, network, contract, count, process, 
         // Pending/unknown results are polled with backoff; processMarket reconciles W14 first.
         store.defer(network, contract, job.market, {now:now(), error:result === 'unknown' ? 'transaction status unknown' : result === 'pending' ? 'transaction pending' : ''});
       }
+      onAttempt({event:'worker_attempt_completed',correlationId:attemptId,marketId:job.market,attempt:job.failures+1,reasonCode:'worker_attempt_completed'});
     } catch (error) {
       if (marketInfo?.status >= 2 || (marketInfo && now() > marketInfo.deadline)) {
         store.completeJob(network, contract, job.market, marketInfo.status >= 2 ? 'complete' : 'expired');
       } else {
         store.defer(network, contract, job.market, {now:now(), error:error?.message || 'market processing failed'});
       }
-      onError(job.market, error);
+      onAttempt({event:'worker_attempt_deferred',correlationId:attemptId,marketId:job.market,attempt:job.failures+1,reasonCode:'worker_attempt_failed'});
+      onError(job.market, error, attemptId);
     }
   }
   return due.map(job => job.market);
