@@ -116,6 +116,7 @@ test('validateResponse filters non-string array entries',()=>{
 test('AI suggestion fixture is stale after form or draft revision changes',()=>{
   const result={
     sourceRevision:{draftId:4,revisionId:9},
+    currentRevision:{draftId:4,revisionId:9},
     expectedDraftId:4,
     expectedRevisionId:9,
     sourceForm:{question:'Original question?',category:'event',collateral:'native'},
@@ -126,6 +127,7 @@ test('AI suggestion fixture is stale after form or draft revision changes',()=>{
   assert.equal(isAiAssistResultStale(result,currentDraft,{...currentForm,question:'Edited question?'}),true);
   assert.equal(isAiAssistResultStale(result,{...currentDraft,draftId:5},currentForm),true);
   assert.equal(isAiAssistResultStale(result,{...currentDraft,revisionId:10},currentForm),true);
+  assert.equal(isAiAssistResultStale({...result,currentRevision:{...result.currentRevision,revisionId:10}},currentDraft,currentForm),true);
 });
 
 // --- AI endpoint integration test ---
@@ -159,6 +161,7 @@ test('AI assist endpoint returns suggestions and records audit',async t=>{
     revisionNumber:1,
     contentHash:created.body.contentHash,
   });
+  assert.deepEqual(result.body.currentRevision,result.body.sourceRevision);
   assert.equal(result.body.suggestions.suggestedQuestion,'Refined question?');
   assert.equal(result.body.suggestions.confidence,'medium');
   // Verify audit trail
@@ -221,6 +224,23 @@ test('AI assist keeps its source revision when the draft changes during a delaye
   assert.equal(result.body.suggestions.suggestedQuestion,'Suggestion for the original draft?');
   assert.equal(result.body.sourceRevision.revisionId,created.body.revisionId);
   assert.notEqual(result.body.sourceRevision.revisionId,updated.body.revisionId);
+  assert.deepEqual(result.body.currentRevision,{
+    draftId:created.body.id,
+    revisionId:updated.body.revisionId,
+    revisionNumber:updated.body.revisionNumber,
+    contentHash:updated.body.contentHash,
+  });
+  const suggestionsForOldRevision={
+    ...result.body,
+    expectedDraftId:created.body.id,
+    expectedRevisionId:created.body.revisionId,
+    sourceForm:{question:'Original draft question?',category:'event',collateral:'native'},
+  };
+  assert.equal(isAiAssistResultStale(
+    suggestionsForOldRevision,
+    {draftId:created.body.id,revisionId:created.body.revisionId},
+    {question:'Original draft question?',category:'event',collateral:'native'},
+  ),true);
   assert.equal(db.prepare('SELECT question FROM draft_revisions WHERE id=?').get(updated.body.revisionId).question,'Edited while AI was running?');
 });
 

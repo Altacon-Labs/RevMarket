@@ -595,6 +595,10 @@ export function createApi(options={}){
             if(getAiSuggestionsFn){suggestions=await getAiSuggestionsFn(draftInput);}
             else{const{getAiSuggestions}=await import('./ai.mjs');suggestions=await getAiSuggestions({...aiConfig,draft:draftInput});}
           }catch(e){throw new ApiError(502,`AI assistance failed: ${e.message}`);}
+          const currentDraft=db.prepare('SELECT current_revision_id FROM drafts WHERE id=?').get(draftId);
+          const currentRevision=currentDraft
+            ? db.prepare('SELECT * FROM draft_revisions WHERE id=?').get(currentDraft.current_revision_id)
+            : null;
           db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'ai_assisted',JSON.stringify({revisionId:revision.id,revisionNumber:revision.revision_number,model:suggestions.model||'unknown',inputHash:suggestions.inputHash||''}),time);
           // Mark draft origin as ai_assisted if it was manual
           if(draft.origin==='manual')db.prepare("UPDATE drafts SET origin='ai_assisted',updated_at=? WHERE id=?").run(time,draftId);
@@ -605,6 +609,12 @@ export function createApi(options={}){
               revisionNumber:revision.revision_number,
               contentHash:revision.content_hash,
             },
+            currentRevision:currentRevision ? {
+              draftId,
+              revisionId:currentRevision.id,
+              revisionNumber:currentRevision.revision_number,
+              contentHash:currentRevision.content_hash,
+            } : null,
             suggestions,
           });
         }

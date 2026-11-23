@@ -620,14 +620,26 @@ export async function requestAiAssist(draftId, expectedRevisionId) {
   ) {
     throw new Error('AI assistance returned an invalid source revision.');
   }
+  const current = response.currentRevision;
+  if (
+    !current ||
+    !Number.isSafeInteger(current.draftId) ||
+    !Number.isSafeInteger(current.revisionId) ||
+    !Number.isSafeInteger(current.revisionNumber) ||
+    typeof current.contentHash !== 'string'
+  ) {
+    throw new Error('AI assistance returned an invalid current revision.');
+  }
   return response;
 }
 
 export function isAiAssistResultStale(result, currentDraft, currentForm) {
-  const {sourceRevision, expectedDraftId, expectedRevisionId, sourceForm} = result;
+  const {sourceRevision, currentRevision, expectedDraftId, expectedRevisionId, sourceForm} = result;
   return (
     sourceRevision.draftId !== expectedDraftId ||
     sourceRevision.revisionId !== expectedRevisionId ||
+    currentRevision.draftId !== sourceRevision.draftId ||
+    currentRevision.revisionId !== sourceRevision.revisionId ||
     currentDraft?.draftId !== expectedDraftId ||
     currentDraft?.revisionId !== expectedRevisionId ||
     currentForm.question !== sourceForm.question ||
