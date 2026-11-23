@@ -573,6 +573,8 @@ export function createApi(options={}){
         // POST /api/drafts/:id/ai-assist — AI drafting suggestions
         if(req.method==='POST'&&subPath==='ai-assist'){
           const wallet=session(req);
+          const body=await bodyOf(req);object(body,['expectedRevisionId']);
+          if(body.expectedRevisionId!==undefined&&(!Number.isSafeInteger(body.expectedRevisionId)||body.expectedRevisionId<=0))throw new ApiError(400,'expectedRevisionId must be a positive integer');
           const draft=db.prepare('SELECT * FROM drafts WHERE id=?').get(draftId);
           if(!draft)throw new ApiError(404,'Draft not found');
           if(draft.owner_wallet!==wallet)throw new ApiError(403,'Only the owner can request AI assistance');
@@ -580,16 +582,31 @@ export function createApi(options={}){
           if(!getAiSuggestionsFn&&!aiConfig)throw new ApiError(503,'AI assistance is not configured');
           const revision=db.prepare('SELECT * FROM draft_revisions WHERE id=?').get(draft.current_revision_id);
           if(!revision)throw new ApiError(404,'No revision found');
+          if(body.expectedRevisionId!==undefined&&body.expectedRevisionId!==revision.id){
+            throw new ApiError(409,'Draft has a newer revision; reload before requesting AI assistance',{
+              code:'revision_conflict',
+              currentRevisionId:revision.id,
+              currentRevisionNumber:revision.revision_number,
+            });
+          }
           const draftInput={question:revision.question,category:revision.category,yesRule:revision.yes_rule,noRule:revision.no_rule,sources:JSON.parse(revision.sources_json||'[]')};
           let suggestions;
           try{
             if(getAiSuggestionsFn){suggestions=await getAiSuggestionsFn(draftInput);}
             else{const{getAiSuggestions}=await import('./ai.mjs');suggestions=await getAiSuggestions({...aiConfig,draft:draftInput});}
           }catch(e){throw new ApiError(502,`AI assistance failed: ${e.message}`);}
-          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'ai_assisted',JSON.stringify({model:suggestions.model||'unknown',inputHash:suggestions.inputHash||''}),time);
+          db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(draftId,wallet,'ai_assisted',JSON.stringify({revisionId:revision.id,revisionNumber:revision.revision_number,model:suggestions.model||'unknown',inputHash:suggestions.inputHash||''}),time);
           // Mark draft origin as ai_assisted if it was manual
           if(draft.origin==='manual')db.prepare("UPDATE drafts SET origin='ai_assisted',updated_at=? WHERE id=?").run(time,draftId);
-          return send(200,{suggestions});
+          return send(200,{
+            sourceRevision:{
+              draftId,
+              revisionId:revision.id,
+              revisionNumber:revision.revision_number,
+              contentHash:revision.content_hash,
+            },
+            suggestions,
+          });
         }
         // POST /api/drafts/:id/publication-intents — create or reuse active publication intent for approved revision
         if(req.method==='POST'&&subPath==='publication-intents'){

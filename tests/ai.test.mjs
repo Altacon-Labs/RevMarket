@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {sanitizeInput, buildPrompt, validateResponse} from '../backend/ai.mjs';
+import {isAiAssistResultStale} from '../frontend/src/lib/backend.mjs';
 
 // --- sanitizeInput tests ---
 test('sanitizeInput extracts and truncates valid fields',()=>{
@@ -112,6 +113,21 @@ test('validateResponse filters non-string array entries',()=>{
   assert.deepEqual(result.suggestedSources,['valid','also valid']);
 });
 
+test('AI suggestion fixture is stale after form or draft revision changes',()=>{
+  const result={
+    sourceRevision:{draftId:4,revisionId:9},
+    expectedDraftId:4,
+    expectedRevisionId:9,
+    sourceForm:{question:'Original question?',category:'event',collateral:'native'},
+  };
+  const currentDraft={draftId:4,revisionId:9};
+  const currentForm={question:'Original question?',category:'event',collateral:'native'};
+  assert.equal(isAiAssistResultStale(result,currentDraft,currentForm),false);
+  assert.equal(isAiAssistResultStale(result,currentDraft,{...currentForm,question:'Edited question?'}),true);
+  assert.equal(isAiAssistResultStale(result,{...currentDraft,draftId:5},currentForm),true);
+  assert.equal(isAiAssistResultStale(result,{...currentDraft,revisionId:10},currentForm),true);
+});
+
 // --- AI endpoint integration test ---
 test('AI assist endpoint returns suggestions and records audit',async t=>{
   // We test via the API with a mock AI function
@@ -135,8 +151,14 @@ test('AI assist endpoint returns suggestions and records audit',async t=>{
   const cookie=await login(creator);
   const created=await call('/drafts',{method:'POST',cookie,body:{question:'Will BTC reach $100k?',tradingClose:2000}});
   assert.equal(created.status,201);
-  const result=await call(`/drafts/${created.body.id}/ai-assist`,{method:'POST',cookie,body:{}});
+  const result=await call(`/drafts/${created.body.id}/ai-assist`,{method:'POST',cookie,body:{expectedRevisionId:created.body.revisionId}});
   assert.equal(result.status,200);
+  assert.deepEqual(result.body.sourceRevision,{
+    draftId:created.body.id,
+    revisionId:created.body.revisionId,
+    revisionNumber:1,
+    contentHash:created.body.contentHash,
+  });
   assert.equal(result.body.suggestions.suggestedQuestion,'Refined question?');
   assert.equal(result.body.suggestions.confidence,'medium');
   // Verify audit trail
@@ -145,6 +167,61 @@ test('AI assist endpoint returns suggestions and records audit',async t=>{
   // Verify origin updated
   const draft=db.prepare('SELECT origin FROM drafts WHERE id=?').get(created.body.id);
   assert.equal(draft.origin,'ai_assisted');
+});
+
+test('AI assist keeps its source revision when the draft changes during a delayed provider request',async t=>{
+  const {openStore}=await import('../backend/store.mjs');
+  const {createApi}=await import('../backend/app.mjs');
+  const {Keypair}=await import('@stellar/stellar-sdk');
+  const origin='http://127.0.0.1:5173';
+  const db=openStore(':memory:');let clock=1000;
+  let markProviderStarted,releaseProvider;
+  const providerStarted=new Promise(resolve=>{markProviderStarted=resolve;});
+  const providerResult=new Promise(resolve=>{releaseProvider=resolve;});
+  let receivedInput;
+  const server=createApi({
+    db,
+    appOrigin:origin,
+    now:()=>clock,
+    getAiSuggestionsFn:async input=>{
+      receivedInput=input;
+      markProviderStarted();
+      await providerResult;
+      return {suggestedQuestion:'Suggestion for the original draft?',confidence:'medium'};
+    },
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(async()=>{await new Promise(resolve=>{server.close(resolve);server.closeAllConnections();});db.close();});
+  const base=`http://127.0.0.1:${server.address().port}`;
+  async function call(path,opts={}){
+    const h={Origin:origin,...opts.headers};if(opts.body!==undefined)h['Content-Type']='application/json';if(opts.cookie)h.Cookie=opts.cookie;
+    const r=await fetch(base+'/api'+path,{method:opts.method||'GET',headers:h,body:opts.body===undefined?undefined:JSON.stringify(opts.body)});
+    return {status:r.status,body:await r.json(),cookie:r.headers.get('set-cookie')?.split(';')[0]};
+  }
+  async function login(key){const c=await call('/auth/challenge',{method:'POST',body:{wallet:key.publicKey()}});return(await call('/auth/verify',{method:'POST',body:{id:c.body.id,signature:Buffer.from(key.signMessage(c.body.message)).toString('base64')}})).cookie;}
+  const creator=Keypair.random();
+  const cookie=await login(creator);
+  const created=await call('/drafts',{method:'POST',cookie,body:{question:'Original draft question?',tradingClose:2000}});
+  const aiRequest=call(`/drafts/${created.body.id}/ai-assist`,{
+    method:'POST',
+    cookie,
+    body:{expectedRevisionId:created.body.revisionId},
+  });
+  await providerStarted;
+  const updated=await call(`/drafts/${created.body.id}`,{
+    method:'PUT',
+    cookie,
+    body:{question:'Edited while AI was running?',tradingClose:2000,expectedRevisionId:created.body.revisionId},
+  });
+  assert.equal(updated.status,200);
+  releaseProvider();
+  const result=await aiRequest;
+  assert.equal(result.status,200);
+  assert.equal(receivedInput.question,'Original draft question?');
+  assert.equal(result.body.suggestions.suggestedQuestion,'Suggestion for the original draft?');
+  assert.equal(result.body.sourceRevision.revisionId,created.body.revisionId);
+  assert.notEqual(result.body.sourceRevision.revisionId,updated.body.revisionId);
+  assert.equal(db.prepare('SELECT question FROM draft_revisions WHERE id=?').get(updated.body.revisionId).question,'Edited while AI was running?');
 });
 
 test('AI assist rejects non-owner and non-editable drafts',async t=>{
