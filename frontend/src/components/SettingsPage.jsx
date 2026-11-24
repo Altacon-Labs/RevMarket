@@ -1,6 +1,8 @@
 import {useEffect, useState} from 'react';
 import {Link} from 'react-router-dom';
 import {api, signInActivity} from '../lib/backend.mjs';
+import {PROFILE_LIFECYCLE_COPY} from '../lib/activity-profile.mjs';
+import {useActivityProfile} from '../lib/useActivityProfile.mjs';
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 
 const shortAddress = address => `${address.slice(0, 8)}…${address.slice(-6)}`;
@@ -8,10 +10,28 @@ const shortAddress = address => `${address.slice(0, 8)}…${address.slice(-6)}`;
 export default function SettingsPage({address, busy, authenticated, authEnabled, user, contractId, rpcUrl, onLogin, onLogout, onConnect, onDisconnect}) {
   const [adminState, setAdminState] = useState({status: 'unverified', message: ''});
   const [adminBusy, setAdminBusy] = useState(false);
+  const {
+    state: profileState,
+    busy: profileBusy,
+    load: refreshProfile,
+    signIn: enableProfile,
+    signOut: signOutProfile,
+    deleteProfile,
+  } = useActivityProfile({address});
   const email = user?.email?.address;
   const rpcHost = (() => {try {return new URL(rpcUrl).host;} catch {return 'Configured RPC';}})();
 
   useEffect(() => setAdminState({status: 'unverified', message: ''}), [address]);
+
+  const profileBadge = profileState.status === 'checking'
+    ? 'Checking…'
+    : profileState.status === 'offline'
+      ? 'Offline'
+      : !address
+        ? 'Wallet disconnected'
+        : profileState.profile
+          ? 'Signed in'
+          : 'Not signed in';
 
   async function verifySuperAdmin() {
     if (!address || adminBusy) return;
@@ -37,6 +57,30 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
     <div className="page-heading"><div><p className="eyebrow">PREFERENCES & SECURITY</p><h1>Settings</h1></div></div>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">ACCOUNT</p><h2>RevMarket sign-in</h2><p>Privy keeps your app account separate from Stellar transaction approvals.</p></div><span className={`settings-state${authenticated ? ' is-active' : ''}`}>{authenticated ? 'Signed in' : 'Not signed in'}</span></div><div className="settings-detail-row"><span>Email</span><strong>{email || 'No email linked'}</strong></div><div className="settings-detail-row"><span>Authentication</span><strong>{authEnabled ? 'Privy email and web3 wallet' : 'Unavailable'}</strong></div>{authenticated ? <button className="button button-secondary" onClick={() => onLogout?.()}>Sign out</button> : <button className="button button-secondary" disabled={!authEnabled} onClick={() => onLogin?.()}>Sign in</button>}</section>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">STELLAR WALLET</p><h2>Transaction account</h2><p>Freighter signs transactions on Stellar Testnet. Sign in to RevMarket before connecting; Privy login does not authorize spending.</p></div><span className={`settings-state${address ? ' is-active' : ''}`}>{address ? 'Connected' : 'Disconnected'}</span></div><div className="settings-detail-row"><span>Address</span><strong>{address ? shortAddress(address) : 'No Freighter account connected'}</strong></div>{address ? <button className="button button-secondary" disabled={busy} onClick={onDisconnect}>Disconnect Freighter</button> : authenticated && <button className="button button-secondary" disabled={busy} onClick={onConnect}>Connect Freighter</button>}</section>
+    <section className="settings-section">
+      <div className="settings-section-heading">
+        <div>
+          <p className="eyebrow">ACTIVITY PROFILE</p>
+          <h2>Off-chain activity session</h2>
+          <p>{PROFILE_LIFECYCLE_COPY.signatureNotice}</p>
+        </div>
+        <span className={`settings-state${profileState.profile ? ' is-active' : ''}`}>{profileBadge}</span>
+      </div>
+      <div className="settings-detail-row"><span>Backend service</span><strong>{profileState.status === 'checking' ? 'Checking…' : profileState.status === 'online' ? 'Online' : 'Offline'}</strong></div>
+      <div className="settings-detail-row"><span>Profile wallet</span><strong>{profileState.profile ? shortAddress(profileState.profile.wallet) : 'No active off-chain session'}</strong></div>
+      <div className="settings-detail-row"><span>Private reports</span><strong>{profileState.profile ? `${profileState.items.length} reported ${profileState.items.length === 1 ? 'action' : 'actions'}` : 'None'}</strong></div>
+      <p className="form-note">{PROFILE_LIFECYCLE_COPY.deletionScopeSummary}</p>
+      {profileState.message && <p className="form-error" role="alert">{profileState.message}</p>}
+      <div className="activity-actions">
+        {profileState.status === 'offline' && <button className="button button-secondary" type="button" disabled={profileBusy} onClick={refreshProfile}>Retry</button>}
+        {profileState.status === 'online' && address && !profileState.profile && <button className="button button-secondary" type="button" disabled={profileBusy} onClick={enableProfile}>Enable activity profile</button>}
+        {profileState.status === 'online' && profileState.profile && <>
+          <button className="button button-secondary" type="button" disabled={profileBusy} onClick={refreshProfile}>Refresh</button>
+          <button className="button button-quiet button-small" type="button" disabled={profileBusy} onClick={signOutProfile}>Sign out of activity</button>
+          <button className="button button-quiet button-small" type="button" disabled={profileBusy} onClick={deleteProfile}>Delete off-chain profile</button>
+        </>}
+      </div>
+    </section>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">NETWORK</p><h2>Stellar Testnet</h2><p>Market creation and positions use the configured Soroban contract.</p></div><span className="settings-state is-active">Testnet</span></div><div className="settings-detail-row"><span>RPC host</span><strong>{rpcHost}</strong></div><div className="settings-detail-row"><span>Contract</span><strong>{contractId || 'Not configured'}</strong></div><div className="settings-detail-row"><span>Market status</span><strong>{contractId ? 'Reading from contract' : 'Read-only: no contract configured'}</strong></div></section>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">ADMINISTRATOR</p><h2>Network access</h2><p>Super-admin access is checked by the backend against the server-side wallet allowlist.</p></div><span className={`settings-state${adminState.status === 'authorized' ? ' is-active' : ''}`}>{adminState.status === 'authorized' ? 'Super admin' : adminState.status === 'denied' ? 'Not authorized' : 'Not verified'}</span></div><button className="button button-secondary" disabled={!address || adminBusy} onClick={verifySuperAdmin}>{adminBusy ? 'Verifying wallet…' : adminState.status === 'authorized' ? 'Refresh admin access' : 'Verify super-admin access'}</button>{adminState.message && <p className={adminState.status === 'error' ? 'form-error' : 'form-note'} role={adminState.status === 'error' ? 'alert' : 'status'}>{adminState.message}</p>}{adminState.status === 'authorized' && <><div className="network-switch" role="group" aria-label="Select Stellar network"><button type="button" className="is-active" aria-pressed="true">Testnet</button><button type="button" disabled={!adminState.access.networks.mainnet.available} title={adminState.access.networks.mainnet.reason} aria-pressed="false">Mainnet</button></div><p className="form-note">{adminState.access.networks.mainnet.reason}</p></>}</section>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">MARKET DATA</p><h2>Price charts</h2><p>Price-market detail charts use 5-minute, hourly, or 6-hour USD candles fetched directly from Coinbase. Event markets show live on-chain pool shares instead of simulated history.</p></div><span className="settings-state is-active">Live source</span></div><div className="settings-detail-row"><span>Supported assets</span><strong>BTC · ETH · XLM</strong></div><div className="settings-detail-row"><span>Refresh interval</span><strong>60 seconds</strong></div></section>
