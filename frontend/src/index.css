@@ -3119,6 +3119,228 @@ a {
   color: var(--blue);
 }
 
+.settings-state.is-revoked {
+  border-color: rgba(240, 91, 101, .38);
+  background: rgba(240, 91, 101, .1);
+  color: #f4878f;
+}
+
+.button-danger {
+  border-color: rgba(240, 91, 101, .65);
+  background: var(--red);
+  color: #fff;
+}
+
+.button-danger:hover:not(:disabled) {
+  border-color: #f57a82;
+  background: #f5727b;
+}
+
+.button-danger-outline {
+  border-color: rgba(240, 91, 101, .45);
+  background: rgba(240, 91, 101, .08);
+  color: #f4878f;
+}
+
+.button-danger-outline:hover:not(:disabled) {
+  border-color: rgba(240, 91, 101, .75);
+  background: rgba(240, 91, 101, .16);
+  color: #fff;
+}
+
+.admin-reviewers {
+  display: grid;
+  gap: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.admin-reviewers-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px 16px;
+}
+
+.admin-reviewers-header h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.admin-reviewers-toolbar {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-reviewers-toolbar .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.reviewer-add-form {
+  display: grid;
+  gap: 8px;
+}
+
+.reviewer-add-form label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reviewer-add-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.reviewer-add-controls input {
+  flex: 1 1 320px;
+  min-width: 0;
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.reviewer-add-controls input[aria-invalid="true"] {
+  border-color: rgba(240, 91, 101, .7);
+}
+
+.reviewer-feedback-success {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(49, 211, 154, .35);
+  border-radius: 10px;
+  background: rgba(49, 211, 154, .09);
+  color: #74dfab;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.reviewer-revoke-confirm {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgba(240, 91, 101, .45);
+  border-radius: 10px;
+  background: rgba(53, 28, 32, .55);
+}
+
+.reviewer-revoke-confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f4878f;
+  font-size: 13px;
+}
+
+.reviewer-revoke-effects {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  color: #d7dce0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.reviewer-revoke-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.reviewer-empty-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reviewer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.reviewer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(12, 14, 16, .65);
+}
+
+.reviewer-row.is-revoked {
+  border-color: var(--line-soft);
+  background: rgba(12, 14, 16, .4);
+}
+
+.reviewer-row.is-pending-revoke {
+  border-color: rgba(240, 91, 101, .55);
+}
+
+.reviewer-row-main {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.reviewer-row-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.reviewer-address-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.reviewer-row.is-revoked .reviewer-address-code {
+  color: var(--muted);
+}
+
+.reviewer-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.reviewer-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 @media (max-width: 1120px) {
   .market-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
