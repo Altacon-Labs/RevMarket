@@ -19,6 +19,7 @@ import SettingsPage from './components/SettingsPage.jsx';
 import InfoPage from './components/InfoPage.jsx';
 import NotFoundPage from './components/NotFoundPage.jsx';
 import ActivityPage from './components/ActivityPage.jsx';
+import PublicationIntentPage from './components/PublicationIntentPage.jsx';
 
 const env = import.meta.env;
 const statuses = ['Open', 'Resolution requested', 'Settled', 'Refundable'];
@@ -302,6 +303,9 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} positions loaded from the contract</p></div></div><PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
           <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} />} />
           <Route path="/activity" element={<ActivityPage address={address} lastAction={lastAction} authenticated={authenticated} authEnabled={privyEnabled && ready} onLogin={onLogin} onConnect={() => runAction(connectWallet)} />} />
+          <Route path="/drafts/:draftId/publish" element={<PublicationIntentPage now={now} />} />
+          <Route path="/drafts/:draftId/revisions/:revisionId/publish" element={<PublicationIntentPage now={now} />} />
+          <Route path="/publication-intents/:intentId" element={<PublicationIntentPage now={now} />} />
           <Route path="/settings" element={<SettingsPage address={address} busy={busy} authenticated={authenticated} authEnabled={privyEnabled && ready} user={user} contractId={env.VITE_CONTRACT_ID} rpcUrl={env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org'} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} />} />
           <Route path="/how-to-use" element={<InfoPage page="how-to-use" />} />
           <Route path="/how-it-works" element={<InfoPage page="how-it-works" />} />

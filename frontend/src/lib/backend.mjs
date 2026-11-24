@@ -675,6 +675,10 @@ export async function createPublicationIntent(draftId, options = {}) {
   return await api(`/drafts/${draftId}/publication-intents`, {method: 'POST', body: options});
 }
 
+export async function listPublicationIntents(draftId) {
+  return await api(`/drafts/${draftId}/publication-intents`);
+}
+
 export async function getPublicationIntent(intentId) {
   return await api(`/publication-intents/${intentId}`);
 }
