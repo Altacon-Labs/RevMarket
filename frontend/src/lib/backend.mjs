@@ -648,6 +648,14 @@ export function isAiAssistResultStale(result, currentDraft, currentForm) {
   );
 }
 
+export async function listDrafts({signal} = {}) {
+  const result = await api('/drafts', {signal});
+  if (!result || !Array.isArray(result.drafts)) {
+    throw new Error('Draft list returned an invalid response.');
+  }
+  return result.drafts;
+}
+
 export async function createDraft(draftData = {}, options = {}) {
   const collateral = draftData.collateral !== undefined
     ? pinCollateralForDraft(draftData.collateral, options)
