@@ -2,7 +2,7 @@ import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 
 const groups = [
   {label: 'Markets', items: [{id: 'markets', label: 'All markets', icon: 'grid', count: 'markets'}, {id: 'price', label: 'Price markets', icon: 'chart', count: 'price'}, {id: 'event', label: 'Event markets', icon: 'globe', count: 'event'}]},
-  {label: 'Workspace', items: [{id: 'positions', label: 'My positions', icon: 'wallet', count: 'positions'}, {id: 'activity', label: 'Activity', icon: 'pulse'}, {id: 'settings', label: 'Settings', icon: 'gear'}]},
+  {label: 'Workspace', items: [{id: 'positions', label: 'My positions', icon: 'wallet', count: 'positions'}, {id: 'drafts', label: 'My drafts', icon: 'pencil'}, {id: 'activity', label: 'Activity', icon: 'pulse'}, {id: 'settings', label: 'Settings', icon: 'gear'}]},
 ];
 
 export default function Sidebar({activePage, counts, collapsed, address, onNavigate}) {

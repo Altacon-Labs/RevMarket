@@ -5,6 +5,7 @@ import {formatAmount, parseAmount, priceUnits} from '../../shared/amount.mjs';
 import {connect, checkWallet, signer, getExistingAddress} from './lib/wallet.mjs';
 import PhosphorIcon from './icons/PhosphorIcon.jsx';
 import {logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import MyDraftsPanel from './components/MyDraftsPanel.jsx';
 import {MOCK_MARKETS} from './lib/mock-data.mjs';
 import Header from './components/Header.jsx';
 import Sidebar from './components/Sidebar.jsx';
@@ -43,6 +44,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const [message, setMessage] = useState('');
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+  const [showDrafts, setShowDrafts] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {return localStorage.getItem('revmarket.sidebar-collapsed') === 'true';} catch {return false;}
   });
@@ -253,9 +255,12 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     ...positionRows.filter(row => row.market.status === 0 && now >= Number(row.market.closes_at) && !row.timedOut).map(row => ({id: `request-${row.market.id}`, icon: 'info', title: 'Settlement can be requested', description: row.market.question, action: 'View positions', page: 'positions'})),
     ...positionRows.filter(row => row.market.status === 1).map(row => ({id: `pending-${row.market.id}`, icon: 'refresh', title: 'Settlement in progress', description: row.market.question, action: 'View positions', page: 'positions'})),
   ].slice(0, 8);
-  const activePage = location.pathname === '/markets/price' ? 'price' : location.pathname === '/markets/event' ? 'event' : location.pathname === '/positions' ? 'positions' : location.pathname === '/activity' ? 'activity' : location.pathname === '/settings' ? 'settings' : location.pathname === '/profile' ? 'profile' : 'markets';
-  const pagePaths = {markets: '/markets', price: '/markets/price', event: '/markets/event', positions: '/positions', activity: '/activity', settings: '/settings', profile: '/profile'};
-  const navigate = page => routerNavigate(pagePaths[page] || '/markets');
+  const activePage = location.pathname === '/markets/price' ? 'price' : location.pathname === '/markets/event' ? 'event' : location.pathname === '/positions' ? 'positions' : location.pathname === '/drafts' ? 'drafts' : location.pathname === '/activity' ? 'activity' : location.pathname === '/settings' ? 'settings' : location.pathname === '/profile' ? 'profile' : 'markets';
+  const pagePaths = {markets: '/markets', price: '/markets/price', event: '/markets/event', positions: '/positions', drafts: '/drafts', activity: '/activity', settings: '/settings', profile: '/profile'};
+  const navigate = page => {
+    if (page === 'drafts') { setShowDrafts(true); return; }
+    routerNavigate(pagePaths[page] || '/markets');
+  };
   const requestResolution = marketId => runAction(() => send('request', [sc.u32(marketId)]));
   const claimPosition = marketId => runAction(() => send('claim', [sc.address(address), sc.u32(marketId)]));
   const predict = (marketId, side, amount) => runAction(() => send('predict', [sc.address(address), sc.u32(marketId), sc.u32(side), sc.i128(parseAmount(amount))]));
@@ -318,5 +323,6 @@ export default function App({privyEnabled = false, ready = false, authenticated 
       </main>
     </div>
     {showCreate && <CreateMarketModal busy={busy} previewMode={previewMode} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}
+    {showDrafts && <MyDraftsPanel onSelectDraft={({draft, revision, reviews}) => { setShowDrafts(false); setShowCreate(true); }} onClose={() => setShowDrafts(false)} />}
   </div>;
 }
