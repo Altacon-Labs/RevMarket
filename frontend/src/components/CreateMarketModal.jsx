@@ -1,4 +1,4 @@
-import {useState} from 'react';
+import {useRef, useState} from 'react';
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 import {
   buildDraftReviewSummary,
@@ -108,6 +108,7 @@ export function CollateralReviewSummary({
 export default function CreateMarketModal({
   busy,
   previewMode,
+  escrow = null,
   onClose,
   onCreate,
   fixtureMode: fixtureModeProp,
@@ -123,6 +124,8 @@ export default function CreateMarketModal({
 
   const [kind, setKind] = useState('event');
   const [error, setError] = useState('');
+  const [uploadFailed, setUploadFailed] = useState(false);
+  const formRef = useRef(null);
   const [question, setQuestion] = useState(() => config.initialDraft?.question || '');
   const [selectedCollateral, setSelectedCollateral] = useState(() => config.initialCollateral);
   const [savedRevision, setSavedRevision] = useState(() => config.initialDraft || null);
@@ -248,19 +251,10 @@ export default function CreateMarketModal({
   async function submit(event) {
     event.preventDefault();
     setError('');
+    setUploadFailed(false);
     const formEl = event.currentTarget;
     const data = new FormData(formEl);
     try {
-      const pinnedCollateral = pinCollateralForDraft(selectedCollateral, {
-        fixtureMode,
-        allowlist: collateralAllowlist,
-        catalog,
-      });
-      const verifiedIdentity = resolveCollateralIdentity(pinnedCollateral, {
-        fixtureMode,
-        allowlist: collateralAllowlist,
-        catalog,
-      });
       const selectedFile = data.get('imageFile');
       const imageFile = selectedFile instanceof File && selectedFile.size > 0 ? selectedFile : null;
       if (imageFile && imageFile.size > 5 * 1024 * 1024) throw new Error('Choose an image smaller than 5 MB.');
@@ -272,11 +266,10 @@ export default function CreateMarketModal({
         target: data.get('target'),
         closes: data.get('closes'),
         description: data.get('description') || '',
-        collateral: pinnedCollateral,
-        collateralIdentity: verifiedIdentity,
         imageFile,
       }, (err) => {
         setError(err.message || 'Creation transaction failed');
+        setUploadFailed(err.code === 'ARTWORK_UPLOAD');
       });
     } catch (submitError) {
       setError(submitError.message);
@@ -294,7 +287,7 @@ export default function CreateMarketModal({
         </div>
         <button className="icon-button" aria-label="Close dialog" onClick={onClose}><PhosphorIcon name="close" /></button>
       </div>
-      <form className="dialog-form" onSubmit={submit}>
+      <form ref={formRef} className="dialog-form" onSubmit={submit}>
         <div className="form-row">
           <label>Market type
             <select value={kind} onChange={event => setKind(event.target.value)}>
@@ -317,7 +310,7 @@ export default function CreateMarketModal({
         <div>
           <label>
             <span>
-              Collateral asset (Stellar Testnet)
+              Proposal collateral (draft review only)
               {fixtureMode && <span className="field-optional">Testnet synthetic fixtures enabled</span>}
             </span>
             <select
@@ -386,7 +379,7 @@ export default function CreateMarketModal({
         </div>}
         {kind === 'price' && <div className="form-row"><label>Asset<select name="asset"><option>BTC</option><option>ETH</option><option>XLM</option></select></label><label>Target USD<input name="target" required inputMode="decimal" placeholder="e.g. 85000" /></label></div>}
         <label>Close time<input name="closes" type="datetime-local" required /></label>
-        <label>Market artwork <span className="field-optional">Optional · custom image or auto-generated</span><input name="imageFile" type="file" accept="image/jpeg,image/png,image/webp" /></label>
+        <label>Market artwork <span className="field-optional">{kind === 'event' ? 'Required for event markets' : 'Optional · price markets show the token mark'}</span><input name="imageFile" type="file" accept="image/jpeg,image/png,image/webp" required={kind === 'event'} /></label>
         <p className="form-note">Artwork uploads are pinned by the backend; an off-chain Freighter sign-in may be requested. Only the image CID is stored on-chain.</p>
         <label>Resolution details / Description <span className="field-optional">Optional</span>
           <textarea name="description" rows="3" placeholder="Explain the resolution source, criteria, and evidence rules..." style={{width: '100%', resize: 'vertical'}} />
@@ -399,8 +392,14 @@ export default function CreateMarketModal({
         />
         <p className="form-note">Price markets use the first post-close observation from three sources. Event markets resolve according to stated evidence providers.</p>
         {previewMode && <p className="form-note">Read-only market preview.</p>}
+        {!previewMode && <p className={escrow?.error ? 'form-error' : 'form-note'} aria-label="Market escrow">
+          {escrow?.error || (escrow
+            ? <>Stakes in this market are escrowed in <strong>{escrow.label}</strong> (contract {escrow.contractId}), set by the deployed market contract. The proposal collateral above is saved with drafts only.</>
+            : 'Reading the escrow asset from the market contract…')}
+        </p>}
         {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="dialog-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={busy || previewMode}>{previewMode ? 'Preview only' : busy ? 'Submitting…' : 'Create on testnet'}</button></div>
+        {uploadFailed && <button type="button" className="button button-secondary" disabled={busy} onClick={() => formRef.current.requestSubmit()}>Retry upload</button>}
+        <div className="dialog-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={busy || previewMode || !escrow?.label}>{previewMode ? 'Preview only' : busy ? 'Submitting…' : 'Create on testnet'}</button></div>
       </form>
     </section>
   </div>;
