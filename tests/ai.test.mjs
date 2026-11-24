@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import {sanitizeInput, buildPrompt, validateResponse} from '../backend/ai.mjs';
-import {isAiAssistResultStale} from '../frontend/src/lib/backend.mjs';
+import {
+  AI_ASSIST_TIMEOUT_MS,
+  DEFAULT_API_TIMEOUT_MS,
+  aiAssistSourceForm,
+  describeAiAssistError,
+  hasSameAiAssistForm,
+  isAiAssistResultStale,
+  planAiAssistRevision,
+  requestAiAssist,
+} from '../frontend/src/lib/backend.mjs';
 
 // --- sanitizeInput tests ---
 test('sanitizeInput extracts and truncates valid fields',()=>{
@@ -270,6 +280,121 @@ test('AI assist rejects non-owner and non-editable drafts',async t=>{
   // Submit to make it non-editable
   await call(`/drafts/${created.body.id}/submit`,{method:'POST',cookie:cc,body:{}});
   assert.equal((await call(`/drafts/${created.body.id}/ai-assist`,{method:'POST',cookie:cc,body:{}})).status,409);
+});
+
+function aiAssistResponse(revisionId = 42) {
+  const revision={draftId:7,revisionId,revisionNumber:2,contentHash:'saved-hash'};
+  return new Response(JSON.stringify({
+    sourceRevision:revision,
+    currentRevision:revision,
+    suggestions:{suggestedQuestion:'A slow result still reaches the form?'},
+  }),{status:200,headers:{'content-type':'application/json'}});
+}
+
+test('AI assist client keeps a longer explicit timeout than the generic browser API client',()=>{
+  assert.equal(DEFAULT_API_TIMEOUT_MS,5000);
+  assert.ok(AI_ASSIST_TIMEOUT_MS>=30_000);
+  assert.ok(AI_ASSIST_TIMEOUT_MS>DEFAULT_API_TIMEOUT_MS);
+});
+
+test('AI assist client receives a provider result after five seconds inside the server budget',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  let seen;
+  const fetcher=async(url,init)=>{
+    seen={url,init};
+    await new Promise(resolve=>setTimeout(resolve,5100));
+    return aiAssistResponse();
+  };
+  const pending=requestAiAssist(7,42,{fetcher});
+  t.mock.timers.tick(5100);
+  const result=await pending;
+  assert.equal(seen.url,'/api/drafts/7/ai-assist');
+  assert.equal(seen.init.method,'POST');
+  assert.equal(seen.init.signal.aborted,false);
+  assert.deepEqual(JSON.parse(seen.init.body),{expectedRevisionId:42});
+  assert.equal(result.sourceRevision.revisionId,42);
+  assert.equal(result.suggestions.suggestedQuestion,'A slow result still reaches the form?');
+});
+
+test('AI assist client times out on its own budget and reports a distinct timeout state',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const fetcher=async()=>{
+    await new Promise(resolve=>setTimeout(resolve,AI_ASSIST_TIMEOUT_MS+1000));
+    return aiAssistResponse();
+  };
+  const pending=requestAiAssist(7,42,{fetcher}).then(()=>null,error=>error);
+  t.mock.timers.tick(AI_ASSIST_TIMEOUT_MS+1000);
+  const error=await pending;
+  assert.equal(error.code,'timeout');
+  const feedback=describeAiAssistError(error);
+  assert.equal(feedback.code,'timeout');
+  assert.match(feedback.message,/\b35s\b/);
+});
+
+test('AI assist cancellation is not reported as a provider failure',async()=>{
+  const controller=new AbortController();
+  controller.abort();
+  const fetcher=async(_url,init)=>{
+    assert.equal(init.signal.aborted,true);
+    throw new DOMException('Aborted','AbortError');
+  };
+  const error=await requestAiAssist(7,42,{signal:controller.signal,fetcher}).then(()=>null,error=>error);
+  assert.equal(error.code,'aborted');
+  assert.equal(describeAiAssistError(error),null);
+});
+
+test('disabled provider, rate limit and timeout produce distinct actionable feedback',()=>{
+  const unavailable=describeAiAssistError(Object.assign(new Error('AI assistance is not configured'),{status:503,body:{error:'AI assistance is not configured'}}));
+  const rateLimited=describeAiAssistError(Object.assign(new Error('Too many requests'),{status:429,body:{error:'Too many requests',retryAfterSeconds:12}}));
+  const timedOut=describeAiAssistError(Object.assign(new Error('AI service timed out'),{status:502,body:{error:'AI service timed out'}}));
+  assert.equal(unavailable.code,'unavailable');
+  assert.match(unavailable.message,/disabled or unavailable/);
+  assert.equal(rateLimited.code,'rate_limit');
+  assert.match(rateLimited.message,/rate limited/);
+  assert.match(rateLimited.message,/12 seconds/);
+  assert.equal(timedOut.code,'timeout');
+  assert.equal(new Set([unavailable.code,rateLimited.code,timedOut.code]).size,3);
+  for(const feedback of [unavailable,rateLimited,timedOut]) assert.match(feedback.message,/saved draft|submit manually/);
+});
+
+test('an explicit AI retry reuses the saved revision when the form is unchanged',()=>{
+  const sourceForm=aiAssistSourceForm({question:'  Will BTC reach 100k?  ',category:'event',collateral:'native'});
+  assert.deepEqual(sourceForm,{question:'Will BTC reach 100k?',category:'event',collateral:'native'});
+  const savedDraft={draftId:3,revisionId:9,revisionNumber:2,contentHash:'hash',form:sourceForm};
+  assert.equal(hasSameAiAssistForm(savedDraft.form,sourceForm),true);
+  assert.deepEqual(planAiAssistRevision({savedDraft,sourceForm}),{reuse:true,draftId:3,revisionId:9});
+  assert.equal(planAiAssistRevision({savedDraft,sourceForm:{...sourceForm,question:'Edited?'}}).reuse,false);
+  assert.equal(planAiAssistRevision({savedDraft,sourceForm:{...sourceForm,collateral:'other'}}).reuse,false);
+  assert.deepEqual(planAiAssistRevision({savedDraft,sourceForm,overwriteRevisionId:11}),{reuse:false,draftId:3,expectedRevisionId:11});
+  assert.deepEqual(planAiAssistRevision({savedDraft:null,sourceForm}),{reuse:false});
+});
+
+test('late AI suggestions from a reopened or switched draft cannot apply to the current form',()=>{
+  const result={
+    sourceRevision:{draftId:4,revisionId:9},
+    currentRevision:{draftId:4,revisionId:9},
+    expectedDraftId:4,
+    expectedRevisionId:9,
+    sourceForm:{question:'Original question?',category:'event',collateral:'native'},
+  };
+  const currentDraft={draftId:4,revisionId:9};
+  const currentForm={question:'Original question?',category:'event',collateral:'native'};
+  assert.equal(isAiAssistResultStale(result,currentDraft,currentForm),false);
+  assert.equal(isAiAssistResultStale(result,null,currentForm),true);
+  assert.equal(isAiAssistResultStale({...result,sourceRevision:{...result.sourceRevision,draftId:99}},currentDraft,currentForm),true);
+  assert.equal(isAiAssistResultStale(result,{...currentDraft,revisionId:10},currentForm),true);
+});
+
+test('create modal keeps manual submission available while aborting late AI work',async()=>{
+  const modalSource=await readFile(new URL('../frontend/src/components/CreateMarketModal.jsx',import.meta.url),'utf8');
+  assert.match(modalSource,/AbortController/);
+  assert.match(modalSource,/aiRequestRef\.current\.controller\.abort\(\)/);
+  assert.match(modalSource,/request\.controller\.signal\.aborted/);
+  assert.match(modalSource,/planAiAssistRevision\(/);
+  assert.match(modalSource,/data-ai-state=\{aiState\}/);
+  assert.match(modalSource,/state=\{aiError\?\.code \|\| \(aiLoading \? 'busy' : null\)\}/);
+  assert.match(modalSource,/Retry AI assistance/);
+  assert.match(modalSource,/disabled=\{busy \|\| previewMode\}/);
 });
 
 test('AI assist returns 503 when not configured',async t=>{

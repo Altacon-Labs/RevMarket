@@ -1,10 +1,13 @@
-import {useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 import {
+  aiAssistSourceForm,
   buildDraftReviewSummary,
   createDraft,
+  describeAiAssistError,
   isAiAssistResultStale,
   pinCollateralForDraft,
+  planAiAssistRevision,
   requestAiAssist,
   resolveCollateralIdentity,
   resolveModalCollateralConfig,
@@ -105,6 +108,17 @@ export function CollateralReviewSummary({
   );
 }
 
+export function AiAssistStatus({state, message, onRetry, retryDisabled = false}) {
+  if (!state || state === 'idle') return null;
+  const retryable = ['timeout', 'rate_limit', 'unavailable', 'error'].includes(state);
+  return (
+    <div className="form-note" role="status" data-ai-state={state} style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
+      <p style={{margin: 0, lineHeight: '18px'}}><PhosphorIcon name="info" size={14} /> {message}</p>
+      {retryable && <button type="button" className="button button-secondary" disabled={retryDisabled} onClick={onRetry} style={{marginTop: '8px'}}>Retry AI assistance</button>}
+    </div>
+  );
+}
+
 export default function CreateMarketModal({
   busy,
   previewMode,
@@ -128,14 +142,55 @@ export default function CreateMarketModal({
   const [savedRevision, setSavedRevision] = useState(() => config.initialDraft || null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSuggestions, setAiSuggestions] = useState(null);
+  const [aiError, setAiError] = useState(null);
   const [savedDraft, setSavedDraft] = useState(null);
   const [revisionConflict, setRevisionConflict] = useState(null);
+  const aiRequestRef = useRef(null);
+  const draftKey = config.initialDraft
+    ? `${config.initialDraft.id ?? config.initialDraft.draftId}:${config.initialDraft.revisionId}:${config.initialDraft.contentHash || ''}`
+    : 'new';
+  const draftKeyRef = useRef(draftKey);
+
+  useEffect(() => {
+    if (draftKeyRef.current === draftKey) return;
+    draftKeyRef.current = draftKey;
+    if (aiRequestRef.current) {
+      aiRequestRef.current.controller.abort();
+      aiRequestRef.current = null;
+    }
+    const initialCollateral = config.initialDraft?.collateral ?? config.initialCollateral;
+    setQuestion(config.initialDraft?.question || '');
+    setSelectedCollateral(initialCollateral);
+    setSavedRevision(config.initialDraft || null);
+    setSavedDraft(config.initialDraft ? {
+      ...config.initialDraft,
+      draftId: config.initialDraft.id ?? config.initialDraft.draftId,
+      form: aiAssistSourceForm({
+        question: config.initialDraft.question,
+        category: config.initialDraft.category,
+        collateral: initialCollateral,
+      }),
+    } : null);
+    setAiLoading(false);
+    setAiSuggestions(null);
+    setAiError(null);
+    setError('');
+    setRevisionConflict(null);
+  }, [draftKey]);
+
+  useEffect(() => () => {
+    if (aiRequestRef.current) {
+      aiRequestRef.current.controller.abort();
+      aiRequestRef.current = null;
+    }
+  }, []);
 
   const aiSuggestionsStale = aiSuggestions && isAiAssistResultStale(
     aiSuggestions,
     savedDraft,
     {question: question.trim(), category: kind, collateral: selectedCollateral},
   );
+  const aiState = aiError?.code || (aiLoading ? 'busy' : aiSuggestionsStale ? 'stale' : aiSuggestions ? 'ready' : 'idle');
 
   const resolvedCollateral = resolveCollateralIdentity(selectedCollateral, {
     fixtureMode,
@@ -163,6 +218,7 @@ export default function CreateMarketModal({
       return;
     }
     setError('');
+    setAiError(null);
     setAiSuggestions(null);
     let pinnedCollateral;
     try {
@@ -175,39 +231,42 @@ export default function CreateMarketModal({
       setError(collateralErr.message);
       return;
     }
+    const request = {controller: new AbortController()};
+    aiRequestRef.current = request;
     setAiLoading(true);
     try {
-      const closesAt = Math.floor(Date.now() / 1000) + 86400 * 7;
-      const draftData = {
-        question: question.trim(),
-        category: kind,
-        tradingClose: closesAt,
-        collateral: pinnedCollateral,
-      };
-      const sourceForm = {
-        question: draftData.question,
-        category: draftData.category,
-        collateral: draftData.collateral,
-      };
-      const collateralOptions = {
-        fixtureMode,
-        allowlist: collateralAllowlist,
-        catalog,
-      };
+      const sourceForm = aiAssistSourceForm({question, category: kind, collateral: pinnedCollateral});
+      const plan = planAiAssistRevision({savedDraft, sourceForm, overwriteRevisionId});
       let next;
-      if (!savedDraft) {
-        const draft = await createDraft({...draftData, origin: 'manual'}, collateralOptions);
-        next = {draftId: draft.id, revisionId: draft.revisionId, revisionNumber: 1, contentHash: draft.contentHash};
+      if (plan.reuse) {
+        next = {...savedDraft};
       } else {
-        // Edit the same draft, based on the revision this modal last saved (or, after an explicit
-        // overwrite choice, on the newer revision reported by the conflict response).
-        const saved = await updateDraft(savedDraft.draftId, draftData, {
-          ...collateralOptions,
-          expectedRevisionId: overwriteRevisionId ?? savedDraft.revisionId,
-        });
-        next = {draftId: savedDraft.draftId, revisionId: saved.revisionId, revisionNumber: saved.revisionNumber, contentHash: saved.contentHash};
+        const closesAt = Math.floor(Date.now() / 1000) + 86400 * 7;
+        const draftData = {
+          question: sourceForm.question,
+          category: kind,
+          tradingClose: closesAt,
+          collateral: pinnedCollateral,
+        };
+        const collateralOptions = {
+          fixtureMode,
+          allowlist: collateralAllowlist,
+          catalog,
+        };
+        if (!savedDraft && overwriteRevisionId === undefined) {
+          const draft = await createDraft({...draftData, origin: 'manual'}, collateralOptions);
+          next = {draftId: draft.id, revisionId: draft.revisionId, revisionNumber: 1, contentHash: draft.contentHash};
+        } else {
+          const saved = await updateDraft(plan.draftId ?? savedDraft.draftId, draftData, {
+            ...collateralOptions,
+            expectedRevisionId: plan.expectedRevisionId,
+          });
+          next = {draftId: savedDraft.draftId, revisionId: saved.revisionId, revisionNumber: saved.revisionNumber, contentHash: saved.contentHash};
+        }
       }
-      setSavedDraft(next);
+      if (aiRequestRef.current !== request || request.controller.signal.aborted) return;
+      const saved = {...next, form: sourceForm};
+      setSavedDraft(saved);
       setRevisionConflict(null);
       setSelectedCollateral(pinnedCollateral);
       setSavedRevision({
@@ -215,11 +274,12 @@ export default function CreateMarketModal({
         revisionId: next.revisionId,
         revisionNumber: next.revisionNumber,
         contentHash: next.contentHash,
-        question: question.trim(),
+        question: sourceForm.question,
         category: kind,
         collateral: pinnedCollateral,
       });
-      const res = await requestAiAssist(next.draftId, next.revisionId);
+      const res = await requestAiAssist(next.draftId, next.revisionId, {signal: request.controller.signal});
+      if (aiRequestRef.current !== request || request.controller.signal.aborted) return;
       setAiSuggestions({
         ...res,
         expectedDraftId: next.draftId,
@@ -227,14 +287,19 @@ export default function CreateMarketModal({
         sourceForm,
       });
     } catch (err) {
-      // A stale edit keeps the typed text untouched and waits for an explicit choice; nothing retries automatically.
+      if (request.controller.signal.aborted || aiRequestRef.current !== request) return;
       if (err.status === 409 && err.body?.code === 'revision_conflict') {
         setRevisionConflict({currentRevisionId: err.body.currentRevisionId, currentRevisionNumber: err.body.currentRevisionNumber});
       } else {
-        setError(err.message || 'AI assistance request failed');
+        const feedback = describeAiAssistError(err);
+        if (feedback) setAiError(feedback);
+        else setError(err.message || 'AI assistance request failed');
       }
     } finally {
-      setAiLoading(false);
+      if (aiRequestRef.current === request) {
+        aiRequestRef.current = null;
+        setAiLoading(false);
+      }
     }
   }
 
@@ -284,7 +349,7 @@ export default function CreateMarketModal({
   }
 
   return <div className="dialog-backdrop" onMouseDown={event => {if (event.target === event.currentTarget) onClose();}}>
-    <section className="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="create-market-title">
+    <section className="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="create-market-title" data-ai-state={aiState}>
       <div className="dialog-heading">
         <div>
           <p className="eyebrow">
@@ -351,7 +416,7 @@ export default function CreateMarketModal({
           <label>Question
             <div style={{display: 'flex', gap: '8px', marginTop: '4px'}}>
               <input name="question" value={question} onChange={e => setQuestion(e.target.value)} required maxLength="512" placeholder="Use a precise, verifiable yes/no question" style={{flex: 1}} />
-              <button type="button" className="button button-secondary" disabled={aiLoading || busy || !resolvedCollateral.available} onClick={() => handleAiAssist()} style={{whiteSpace: 'nowrap'}}>
+              <button type="button" className="button button-secondary" aria-busy={aiLoading} disabled={aiLoading || busy || !resolvedCollateral.available} onClick={() => handleAiAssist()} style={{whiteSpace: 'nowrap'}}>
                 {aiLoading ? 'Analyzing…' : 'Improve with AI'}
               </button>
             </div>
@@ -360,6 +425,12 @@ export default function CreateMarketModal({
             <p><PhosphorIcon name="info" size={14} /> This draft was changed in another tab or window (now revision {revisionConflict.currentRevisionNumber}). Your text is still here; nothing was overwritten.</p>
             <button type="button" className="button button-secondary" disabled={aiLoading || busy} onClick={() => handleAiAssist(revisionConflict.currentRevisionId)}>Save my version as a new revision</button>
           </div>}
+          <AiAssistStatus
+            state={aiError?.code || (aiLoading ? 'busy' : null)}
+            message={aiError?.message || 'Analyzing your saved draft. You can keep editing or submit manually.'}
+            onRetry={() => handleAiAssist()}
+            retryDisabled={aiLoading || busy}
+          />
           {aiSuggestions && <div className="form-note" role="status" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
             <p><strong>AI Suggestions · draft revision #{aiSuggestions.sourceRevision.revisionNumber}</strong></p>
             {aiSuggestionsStale && <p className="form-error">
