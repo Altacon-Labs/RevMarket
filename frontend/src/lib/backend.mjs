@@ -516,42 +516,84 @@ export function resolveModalCollateralConfig({
   };
 }
 
+let activityExpiryTimer;
+
+function rememberActivityExpiry(profile) {
+  if (activityExpiryTimer) clearTimeout(activityExpiryTimer);
+  if (!Number.isFinite(profile?.expiresAt)) return;
+  const delay = profile.expiresAt * 1000 - Date.now();
+  if (delay <= 0) {
+    clearActivitySession('expired');
+    return;
+  }
+  activityExpiryTimer = setTimeout(() => clearActivitySession('expired'), delay);
+}
+
 export async function api(path, {method = 'GET', body, signal} = {}) {
-  const response = await fetch('/api' + path, {
-    method,
-    credentials: 'same-origin',
-    signal: signal || AbortSignal.timeout(5000),
-    headers: body ? {'Content-Type': 'application/json'} : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let response;
+  try {
+    response = await fetch('/api' + path, {
+      method,
+      credentials: 'same-origin',
+      signal: signal || AbortSignal.timeout(5000),
+      headers: body ? {'Content-Type': 'application/json'} : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (cause) {
+    if (cause.name === 'AbortError' || cause.name === 'TimeoutError') throw cause;
+    const error = new Error('Activity service unavailable');
+    error.code = 'API_UNREACHABLE';
+    throw error;
+  }
   let value;
   try {
     value = await response.json();
   } catch {
-    throw new Error('Activity service unavailable');
+    const error = new Error('Activity service returned an invalid response');
+    error.code = 'INVALID_API_RESPONSE';
+    throw error;
   }
   if (!response.ok) {
     const error = new Error(value.error || 'Activity service error');
     error.status = response.status;
     error.body = value;
+    if (response.status === 401 && path !== '/me' && !path.startsWith('/auth/')) clearActivitySession('expired');
     throw error;
   }
   return value;
 }
 
+export function clearActivitySession(reason = 'expired') {
+  if (activityExpiryTimer) clearTimeout(activityExpiryTimer);
+  activityExpiryTimer = undefined;
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('revmarket:activity-session-invalidated', {detail: {reason}}));
+}
+
 export async function signInActivity(address, isCurrent = () => true) {
+  const assertCurrent = () => {
+    if (!isCurrent()) throw new Error('Wallet selection changed; sign in again.');
+  };
   const [freighter, {checkWallet}] = await Promise.all([
     import('@stellar/freighter-api'),
     import('./wallet.mjs'),
   ]);
   const signMessage = freighter.signMessage || freighter.default?.signMessage;
   await checkWallet(address);
+  assertCurrent();
   const challenge = await api('/auth/challenge', {method: 'POST', body: {wallet: address}});
+  assertCurrent();
   const prefix = `RevMarket sign-in\nOrigin: ${window.location.origin}\nNetwork: Stellar Testnet\nWallet: ${address}\n`;
-  if (challenge.origin !== window.location.origin || challenge.wallet !== address || typeof challenge.message !== 'string' || !challenge.message.startsWith(prefix) || challenge.expiresAt <= Date.now() / 1000 || challenge.expiresAt > Date.now() / 1000 + 180) {
+  if (typeof challenge.expiresAt !== 'number' || !Number.isFinite(challenge.expiresAt)) {
+    throw new Error('Invalid activity sign-in challenge');
+  }
+  if (challenge.expiresAt <= Date.now() / 1000) {
+    throw new Error('Activity sign-in challenge expired. Try again.');
+  }
+  if (challenge.origin !== window.location.origin || challenge.wallet !== address || typeof challenge.message !== 'string' || !challenge.message.startsWith(prefix) || challenge.expiresAt > Date.now() / 1000 + 180) {
     throw new Error('Invalid activity sign-in challenge');
   }
   const signed = await signMessage(challenge.message, {address});
+  assertCurrent();
   if (signed.error || !signed.signedMessage || signed.signerAddress !== address) {
     throw new Error('Activity sign-in signature declined or signer changed');
   }
@@ -562,21 +604,64 @@ export async function signInActivity(address, isCurrent = () => true) {
     : btoa(String.fromCharCode(...signed.signedMessage));
   const result = await api('/auth/verify', {method: 'POST', body: {id: challenge.id, signature}});
   if (!isCurrent()) {
+    clearActivitySession('logout');
     await logoutActivity().catch(() => {});
     throw new Error('Wallet selection changed; sign in again');
   }
   return result;
 }
 
+export async function ensureActivitySession(address, {
+  isCurrent = () => true,
+  checkWallet: validateWallet,
+  request = api,
+  signIn = signInActivity,
+} = {}) {
+  if (!address) throw new Error('Connect a Freighter wallet first.');
+  const {checkWallet} = validateWallet ? {checkWallet: validateWallet} : await import('./wallet.mjs');
+  const assertCurrent = () => {
+    if (!isCurrent()) throw new Error('Wallet selection changed; sign in again.');
+  };
+  await checkWallet(address);
+  assertCurrent();
+
+  let profile = null;
+  try {
+    profile = await request('/me');
+  } catch (error) {
+    if (error.status !== 401) throw error;
+  }
+  assertCurrent();
+  let established = false;
+  if (profile?.wallet !== address) {
+    await signIn(address, isCurrent);
+    established = true;
+    assertCurrent();
+    profile = await request('/me');
+    assertCurrent();
+  }
+  if (profile?.wallet !== address) {
+    throw new Error('Backend session wallet does not match the connected Freighter wallet.');
+  }
+  rememberActivityExpiry(profile);
+  return {profile, established};
+}
+
 export async function uploadMarketImage(file, wallet, isCurrent = () => true) {
   if (!file || file.size <= 0 || file.size > 5 * 1024 * 1024) throw new Error('Choose an image smaller than 5 MB.');
   const {checkWallet} = await import('./wallet.mjs');
-  await checkWallet(wallet);
-  let profile = null;
-  try {profile = await api('/me');} catch (error) {if (error.status !== 401) throw error;}
-  if (profile?.wallet !== wallet) await signInActivity(wallet, isCurrent);
-  await checkWallet(wallet);
-  if (!isCurrent()) throw new Error('Wallet selection changed; upload again.');
+  let session;
+  try {
+    session = await ensureActivitySession(wallet, {isCurrent, checkWallet});
+  } catch (error) {
+    error.activitySession = true;
+    throw error;
+  }
+  if (session.established) {
+    const error = new Error('Backend wallet session established. Submit again to resume market creation.');
+    error.code = 'SESSION_ESTABLISHED';
+    throw error;
+  }
 
   const form = new FormData();
   form.append('image', file, file.name);
@@ -589,12 +674,24 @@ export async function uploadMarketImage(file, wallet, isCurrent = () => true) {
   });
   let result;
   try {result = await response.json();} catch {throw new Error('Image upload service returned an invalid response.');}
-  if (!response.ok) throw new Error(result.error || 'Market image upload failed.');
+  if (!response.ok) {
+    const error = new Error(result.error || 'Market image upload failed.');
+    error.status = response.status;
+    throw error;
+  }
+  if (!isCurrent()) throw new Error('Wallet selection changed; upload again.');
+  const profile = await api('/me');
+  if (profile.wallet !== wallet) throw new Error('Backend session wallet changed; upload again.');
+  if (!isCurrent()) throw new Error('Wallet selection changed; upload again.');
   if (typeof result.cid !== 'string' || !/^bafy[a-z2-7]{20,}$/.test(result.cid)) throw new Error('Image upload returned an invalid CID.');
   return result.cid;
 }
 
-export const logoutActivity = () => api('/logout', {method: 'POST'});
+export async function logoutActivity() {
+  const result = await api('/logout', {method: 'POST'});
+  clearActivitySession('logout');
+  return result;
+}
 
 export async function reportActivity(wallet, action, txHash) {
   try {

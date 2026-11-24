@@ -381,7 +381,9 @@ export function createApi(options={}){
       }
       if(route==='GET /api/me'){
         const wallet=session(req);
-        return send(200,{...db.prepare('SELECT wallet,created_at AS createdAt,last_login AS lastLogin FROM users WHERE wallet=?').get(wallet),automationEnabled:false});
+        const token=tokenOf(req);
+        const {expiresAt}=db.prepare('SELECT expires_at AS expiresAt FROM sessions WHERE token_hash=?').get(hash(token));
+        return send(200,{...db.prepare('SELECT wallet,created_at AS createdAt,last_login AS lastLogin FROM users WHERE wallet=?').get(wallet),expiresAt,automationEnabled:false});
       }
       if(route==='GET /api/admin/network'){
         const wallet=session(req);

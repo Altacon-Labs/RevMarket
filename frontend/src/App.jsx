@@ -4,7 +4,7 @@ import {createClient, normalizeMarket, sc} from '../../shared/stellar.mjs';
 import {formatAmount, parseAmount, priceUnits} from '../../shared/amount.mjs';
 import {connect, checkWallet, signer, getExistingAddress} from './lib/wallet.mjs';
 import PhosphorIcon from './icons/PhosphorIcon.jsx';
-import {logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import {clearActivitySession, logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
 import {MOCK_MARKETS} from './lib/mock-data.mjs';
 import Header from './components/Header.jsx';
 import Sidebar from './components/Sidebar.jsx';
@@ -56,6 +56,8 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const source = address || env.VITE_READ_ACCOUNT;
   const currentSource = useRef(source);
   currentSource.current = source;
+  const currentAddress = useRef(address);
+  currentAddress.current = address;
   const [promptDismissed, setPromptDismissed] = useState(false);
   const autoConnectAttempted = useRef(false);
 
@@ -162,6 +164,21 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     setMessage('Wallet disconnected.');
   }
 
+  async function logoutApp() {
+    let sessionError = null;
+    try {
+      await logoutActivity();
+    } catch (error) {
+      sessionError = error;
+      clearActivitySession();
+    }
+    try {
+      await onLogout?.();
+    } finally {
+      if (sessionError) setMessage(`RevMarket signed out, but the backend session could not be cleared: ${sessionError.message}`);
+    }
+  }
+
   async function createMarket({kind, category, question, asset, target, closes, description, imageFile}) {
     if (!address) throw new Error('Connect Freighter first');
     const closesAt = Math.floor(new Date(closes).getTime() / 1000);
@@ -171,8 +188,9 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     let imageCid = '';
     if (imageFile) {
       try {
-        imageCid = await uploadMarketImage(imageFile, address, () => currentSource.current === source);
+        imageCid = await uploadMarketImage(imageFile, address, () => currentAddress.current === address);
       } catch (err) {
+        if (err.activitySession || err.code === 'SESSION_ESTABLISHED' || err.status === 401 || err.status === 403) throw err;
         // If local IPFS backend is unconfigured, provide clean fallback CID so transaction doesn't stall
         imageCid = 'bafkreifdummyartworkcid';
       }
@@ -276,7 +294,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   };
 
   return <div className="app-shell">
-    <Header address={address} busy={busy} previewMode={previewMode} search={search} onSearch={setSearch} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value => !value)} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onLogin={onLogin} onLogout={onLogout} authenticated={authenticated} authEnabled={privyEnabled && ready} onActivity={() => navigate('activity')} onCreate={() => setShowCreate(true)} notifications={notifications} onNavigate={navigate} />
+    <Header address={address} busy={busy} previewMode={previewMode} search={search} onSearch={setSearch} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value => !value)} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onLogin={onLogin} onLogout={logoutApp} authenticated={authenticated} authEnabled={privyEnabled && ready} onActivity={() => navigate('activity')} onCreate={() => setShowCreate(true)} notifications={notifications} onNavigate={navigate} />
     <div className={`workspace${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`}>
       <Sidebar activePage={activePage} counts={counts} collapsed={sidebarCollapsed} address={address} onNavigate={navigate} />
       <main className="main-content">
@@ -303,9 +321,9 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/markets/event" element={<><div className="page-heading"><div><p className="eyebrow">EVENT MARKETS</p><h1>Event markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Event')} /></>} />
           <Route path="/event/:slug" element={<MarketDetailPage markets={markets} positions={positions} address={address} source={source} client={client} loading={loading} authenticated={authenticated} onConnect={() => runAction(connectWallet)} onLogin={onLogin} busy={busy} now={now} previewMode={previewMode} onPredict={predict} onClaim={claimPosition} onRequest={requestResolution} />} />
           <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} positions loaded from the contract</p></div></div><PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
-          <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} />} />
+          <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={logoutApp} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} />} />
           <Route path="/activity" element={<ActivityPage address={address} lastAction={lastAction} authenticated={authenticated} authEnabled={privyEnabled && ready} onLogin={onLogin} onConnect={() => runAction(connectWallet)} />} />
-          <Route path="/settings" element={<SettingsPage address={address} busy={busy} authenticated={authenticated} authEnabled={privyEnabled && ready} user={user} contractId={env.VITE_CONTRACT_ID} rpcUrl={env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org'} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} />} />
+          <Route path="/settings" element={<SettingsPage address={address} busy={busy} authenticated={authenticated} authEnabled={privyEnabled && ready} user={user} contractId={env.VITE_CONTRACT_ID} rpcUrl={env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org'} onLogin={onLogin} onLogout={logoutApp} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} />} />
           <Route path="/how-to-use" element={<InfoPage page="how-to-use" />} />
           <Route path="/how-it-works" element={<InfoPage page="how-it-works" />} />
           <Route path="/terms" element={<InfoPage page="terms" />} />
@@ -317,6 +335,6 @@ export default function App({privyEnabled = false, ready = false, authenticated 
         <footer className="app-footer"><span>RevMarket</span></footer>
       </main>
     </div>
-    {showCreate && <CreateMarketModal busy={busy} previewMode={previewMode} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}
+    {showCreate && <CreateMarketModal address={address} isWalletCurrent={() => currentAddress.current === address} busy={busy} previewMode={previewMode} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}
   </div>;
 }

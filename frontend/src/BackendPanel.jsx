@@ -1,13 +1,19 @@
-import {useEffect,useRef,useState} from 'react';
-import {api,logoutActivity,signInActivity} from './lib/backend.mjs';
+import {useEffect,useLayoutEffect,useRef,useState} from 'react';
+import {api,ensureActivitySession,logoutActivity} from './lib/backend.mjs';
 import PhosphorIcon from './icons/PhosphorIcon.jsx';
 import {ActivityEmptyState,ActivitySection} from './components/ActivitySection.jsx';
 
-export default function BackendPanel({address,lastAction,authenticated,authEnabled,onLogin,onConnect}){
+export default function BackendPanel({address,lastAction,onConnect}){
   const [state,setState]=useState({status:'checking',profile:null,items:[],message:''});
   const [busy,setBusy]=useState(false);
   const generation=useRef(0);
   const activeAddress=useRef(address);activeAddress.current=address;
+  useLayoutEffect(()=>setState({status:'checking',profile:null,items:[],message:''}),[address]);
+  useEffect(()=>{
+    const clearProfile=()=>{generation.current++;setState(s=>({...s,profile:null,items:[],message:'The signed backend session ended. Sign in again to view wallet activity.'}));};
+    window.addEventListener('revmarket:activity-session-invalidated',clearProfile);
+    return()=>window.removeEventListener('revmarket:activity-session-invalidated',clearProfile);
+  },[]);
   async function load(){
     const version=++generation.current;
     try{
@@ -33,9 +39,8 @@ export default function BackendPanel({address,lastAction,authenticated,authEnabl
   let emptyState;
   if(state.status==='checking')emptyState={icon:'refresh',title:'Checking activity service',description:'Loading your off-chain activity status.'};
   else if(state.status==='offline')emptyState={icon:'info',title:'Activity service unavailable',description:state.message,action:{label:'Retry',disabled:busy,onClick:()=>act(load)}};
-  else if(!authenticated)emptyState={icon:'user',title:'Sign in to view activity',description:'Sign in to your RevMarket account before connecting a Stellar wallet.',action:{label:'Sign in',disabled:!authEnabled,onClick:onLogin}};
   else if(!address)emptyState={icon:'wallet',title:'Connect a Stellar wallet',description:'Connect Freighter to create a wallet-scoped activity profile.',action:{label:'Connect Freighter',disabled:busy,onClick:onConnect}};
-  else if(!state.profile)emptyState={icon:'user',title:'Activity profile not set up',description:'Create an optional off-chain profile to review actions reported by this app.',action:{label:'Enable activity profile',disabled:busy,onClick:()=>act(()=>signInActivity(address,()=>activeAddress.current===address))}};
+  else if(!state.profile)emptyState={icon:'user',title:'Activity profile not set up',description:'Create an optional off-chain profile to review actions reported by this app.',action:{label:'Enable activity profile',disabled:busy,onClick:()=>act(()=>ensureActivitySession(address,{isCurrent:()=>activeAddress.current===address}))}};
   else if(state.items.length===0)emptyState={icon:'pulse',title:'No reported actions yet',description:'Market actions reported by this app will appear here.',action:{label:'Refresh',disabled:busy,onClick:()=>act(load)}};
 
   return <ActivitySection id="activity-profile-title" title="Activity profile" icon="wallet" status={statusLabel}>
