@@ -45,68 +45,102 @@ function buildCleanEnv(overrides) {
   return {...base, ...overrides};
 }
 
-function runFailingStartup(envOverrides) {
-  return new Promise((res, rej) => {
-    const child = spawn(process.execPath, ['--experimental-sqlite', serverScript], {
-      env: buildCleanEnv(envOverrides),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', d => { stdout += d; });
-    child.stderr.on('data', d => { stderr += d; });
-    child.on('error', rej);
-    child.on('exit', code => res({code, stdout, stderr}));
-  });
-}
+const STARTUP_TIMEOUT_MS = 45_000;
+const SHUTDOWN_TIMEOUT_MS = 5_000;
+const SIGNAL_TIMEOUT_MS = 2_000;
 
-async function startStagingApi(envOverrides, port) {
+function spawnBackend(children, envOverrides, ipc = false) {
   const child = spawn(process.execPath, ['--experimental-sqlite', serverScript], {
     env: buildCleanEnv(envOverrides),
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
   });
-  let stderr = '';
-  child.stdout.resume();
+  const backend = {child, stdout: '', stderr: '', result: undefined, error: undefined};
+  child.on('error', error => { backend.error = error; });
+  // close also fires after a spawn error and ensures captured output has drained.
+  backend.closed = new Promise(resolve => child.once('close', (code, signal) => {
+    backend.result = {code, signal};
+    children.delete(backend);
+    resolve(backend.result);
+  }));
+  children.add(backend);
+  child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stderr.on('data', d => { stderr += d; });
-  const exited = new Promise(r => child.once('exit', (code, signal) => r({code, signal})));
-  const t = performance.now();
-  for (;;) {
-    if (child.exitCode !== null) {
-      throw new Error(`staging backend exited during start (${child.exitCode}): ${stderr.trim()}`);
+  if (ipc) child.stdout.resume();
+  else child.stdout.on('data', data => { backend.stdout += data; });
+  child.stderr.on('data', data => { backend.stderr += data; });
+  return backend;
+}
+
+async function waitForClose(backend, timeoutMs) {
+  if (backend.result) return backend.result;
+  let timer;
+  try {
+    return await Promise.race([
+      backend.closed,
+      new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function terminateBackend(backend) {
+  if (backend.result) return backend.result;
+  backend.child.kill('SIGTERM');
+  const graceful = await waitForClose(backend, SIGNAL_TIMEOUT_MS);
+  if (graceful) return graceful;
+
+  backend.child.kill('SIGKILL');
+  const forced = await waitForClose(backend, SIGNAL_TIMEOUT_MS);
+  if (forced) return forced;
+  throw new Error(`could not confirm staging backend termination for PID ${backend.child.pid} after SIGKILL`);
+}
+
+async function runFailingStartup(children, envOverrides) {
+  const backend = spawnBackend(children, envOverrides);
+  const result = await waitForClose(backend, STARTUP_TIMEOUT_MS);
+  if (backend.error) throw backend.error;
+  if (!result) throw new Error(`invalid-config backend did not exit within ${STARTUP_TIMEOUT_MS}ms`);
+  return {code: result.code, stdout: backend.stdout, stderr: backend.stderr};
+}
+
+async function startStagingApi(children, envOverrides, port) {
+  const backend = spawnBackend(children, envOverrides, true);
+  const started = performance.now();
+  while (performance.now() - started < STARTUP_TIMEOUT_MS) {
+    if (backend.error) throw backend.error;
+    if (backend.result) {
+      const {code, signal} = backend.result;
+      throw new Error(`staging backend exited during start (code ${code}, signal ${signal}): ${backend.stderr.trim()}`);
     }
-    if ((await defaultProbe(port, {timeoutMs: 500})).up) break;
-    if (performance.now() - t > 45_000) {
-      child.kill();
-      throw new Error(`staging backend did not become ready within 45s: ${stderr.trim()}`);
+    if ((await defaultProbe(port, {timeoutMs: 500})).up) {
+      backend.startMs = ms(performance.now() - started);
+      return backend;
     }
     await sleep(15);
   }
-  return {child, exited, startMs: ms(performance.now() - t)};
+  throw new Error(`staging backend did not become ready within ${STARTUP_TIMEOUT_MS}ms: ${backend.stderr.trim()}`);
 }
 
 async function stopStagingApiGracefully(api, port) {
-  const t = performance.now();
-  if (api.child.connected) {
-    api.child.send('shutdown');
-  } else {
-    api.child.kill('SIGTERM');
+  const started = performance.now();
+  if (api.child.connected) api.child.send('shutdown', error => { if (error) api.error = error; });
+  else if (!api.result) api.child.kill('SIGTERM');
+  const result = await waitForClose(api, SHUTDOWN_TIMEOUT_MS);
+  if (!result) {
+    throw new Error(`graceful shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms`);
   }
-  const timeout = setTimeout(() => {
-    if (api.child.exitCode === null) api.child.kill();
-  }, 5000);
-  timeout.unref();
-  const exitResult = await api.exited;
-  clearTimeout(timeout);
-  const stopMs = ms(performance.now() - t);
+  if (api.error) throw api.error;
+  const stopMs = ms(performance.now() - started);
   const probe = await defaultProbe(port, {timeoutMs: 500});
   if (probe.up) throw new Error('staging backend still answered health probe after graceful shutdown');
-  return {stopMs, exitCode: exitResult.code};
+  if (result.code !== 0) {
+    throw new Error(`graceful shutdown failed (exit code ${result.code}, signal ${result.signal})`);
+  }
+  return {stopMs, exitCode: result.code};
 }
 
-async function startFixtureAiServer() {
+async function startFixtureAiServer(observationTime) {
   const server = createHttpServer(async (req, res) => {
     if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
       res.writeHead(404);
@@ -115,7 +149,7 @@ async function startFixtureAiServer() {
     }
     req.resume();
     const content = JSON.stringify({
-      suggestedQuestion: 'Will Stellar Testnet ledger protocol remain >= 22 through Q4 2026?',
+      suggestedQuestion: `Will Stellar Testnet ledger protocol be >= 22 at ${new Date(observationTime * 1000).toISOString()}?`,
       suggestedYesRule: 'Observed Testnet protocolVersion >= 22 at observation time',
       suggestedNoRule: 'Observed Testnet protocolVersion < 22 at observation time',
       suggestedSources: ['Stellar Testnet Horizon', 'Soroban Testnet RPC'],
@@ -127,11 +161,20 @@ async function startFixtureAiServer() {
     res.writeHead(200, {'Content-Type': 'application/json'});
     res.end(JSON.stringify({choices: [{message: {content}}]}));
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
   const {port} = server.address();
   return {
     endpoint: `http://127.0.0.1:${port}/v1/chat/completions`,
-    close: () => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }),
+    close: () => new Promise((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    }),
   };
 }
 
@@ -167,44 +210,77 @@ async function apiCall(port, path, {method = 'GET', body, cookie, origin = STAGI
 }
 
 await runCli('staging:drill', async () => {
-  let values;
-  try {
-    ({values} = parseArgs({strict: true, options: {keep: {type: 'boolean'}}}));
-  } catch (e) {
-    throw new UsageError(`${e.message}. Usage: staging:drill [--keep]`);
+  const checkResults = {
+    missingConfigNamesOnly: 'skipped',
+    partialAiConfigNamesOnly: 'skipped',
+    workerSecretRejectedOnApi: 'skipped',
+    readinessExposedToHost: 'skipped',
+    evidenceVolumePersistedAndExported: 'skipped',
+    createDraftWithAiDisabled: 'skipped',
+    aiDisabledReturns503: 'skipped',
+    manualDraftingWithAiDisabled: 'skipped',
+    restartPreservesDraftsAndSessions: 'skipped',
+    wiredAiAssistWorksWhenConfigured: 'skipped',
+    onlineBackup: 'skipped',
+    postBackupMutation: 'skipped',
+    verifyRestore: 'skipped',
+    rollbackRestoresExactSnapshot: 'skipped',
+  };
+  let activeCheck;
+  function passCheck() {
+    checkResults[activeCheck] = 'passed';
+    activeCheck = undefined;
   }
-
-  const dir = await mkdtemp(join(tmpdir(), 'revmarket-staging-drill-'));
-  const dbVolume = join(dir, 'volumes', 'db');
-  const evidenceVolume = join(dir, 'volumes', 'evidence');
-  const evidenceExportDir = join(dir, 'volumes', 'evidence-share');
-  const backupVolume = join(dir, 'volumes', 'backups');
-  await mkdir(dbVolume, {recursive: true});
-  await mkdir(evidenceVolume, {recursive: true});
-  await mkdir(evidenceExportDir, {recursive: true});
-  await mkdir(backupVolume, {recursive: true});
-
-  const dbPath = join(dbVolume, 'revmarket.sqlite');
+  const children = new Set();
+  const cleanupErrors = [];
+  let failure;
+  let phase = 'setup';
+  let dir;
+  let keep = false;
   let api;
   let aiServer;
+  let summary;
 
   try {
+    try {
+      ({values: {keep}} = parseArgs({strict: true, options: {keep: {type: 'boolean'}}}));
+    } catch (error) {
+      throw new UsageError(`${error.message}. Usage: staging:drill [--keep]`);
+    }
+
+    dir = await mkdtemp(join(tmpdir(), 'revmarket-staging-drill-'));
+    const dbVolume = join(dir, 'volumes', 'db');
+    const evidenceVolume = join(dir, 'volumes', 'evidence');
+    const evidenceExportDir = join(dir, 'volumes', 'evidence-share');
+    const backupVolume = join(dir, 'volumes', 'backups');
+    await mkdir(dbVolume, {recursive: true});
+    await mkdir(evidenceVolume, {recursive: true});
+    await mkdir(evidenceExportDir, {recursive: true});
+    await mkdir(backupVolume, {recursive: true});
+
+    const dbPath = join(dbVolume, 'revmarket.sqlite');
+
+    phase = 'workflow';
     // 1. Startup validation failure drills (variable names only, no secret leak, no DB created)
     const sentinelSecret = 'SECRET_VALUE_MUST_NEVER_APPEAR_987654';
-    const missingStaging = await runFailingStartup({
+    activeCheck = 'missingConfigNamesOnly';
+    const missingStaging = await runFailingStartup(children, {
       BACKEND_ENV: 'staging',
       PINATA_JWT: sentinelSecret,
     });
     if (missingStaging.code !== 1) throw new Error('expected exit code 1 for missing staging variables');
     if (!missingStaging.stderr.includes('Missing required configuration: APP_ORIGIN, BACKEND_DB, BACKEND_PORT')) {
-      throw new Error(`unexpected missing-config message: ${missingStaging.stderr}`);
+      throw new Error('missing-config startup did not report the expected variable names');
     }
     if (missingStaging.stderr.includes(sentinelSecret) || missingStaging.stdout.includes(sentinelSecret)) {
       throw new Error('startup validation leaked a secret value');
     }
     if (existsSync(dbPath)) throw new Error('database file was created despite startup config validation failure');
 
-    const partialAi = await runFailingStartup({
+    passCheck();
+
+    activeCheck = 'partialAiConfigNamesOnly';
+    const partialAi = await runFailingStartup(children, {
       BACKEND_ENV: 'staging',
       APP_ORIGIN: STAGING_ORIGIN,
       BACKEND_DB: dbPath,
@@ -213,13 +289,16 @@ await runCli('staging:drill', async () => {
       AI_API_KEY: sentinelSecret,
     });
     if (partialAi.code !== 1 || !partialAi.stderr.includes('Missing required configuration: AI_ENDPOINT, AI_MODEL')) {
-      throw new Error(`unexpected partial-AI failure: ${partialAi.stderr}`);
+      throw new Error('partial AI startup did not report the expected variable names');
     }
-    if (partialAi.stderr.includes(sentinelSecret)) {
+    if (partialAi.stderr.includes(sentinelSecret) || partialAi.stdout.includes(sentinelSecret)) {
       throw new Error('partial AI config error leaked AI_API_KEY');
     }
 
-    const leakedWorkerKey = await runFailingStartup({
+    passCheck();
+
+    activeCheck = 'workerSecretRejectedOnApi';
+    const leakedWorkerKey = await runFailingStartup(children, {
       BACKEND_ENV: 'staging',
       APP_ORIGIN: STAGING_ORIGIN,
       BACKEND_DB: dbPath,
@@ -227,12 +306,15 @@ await runCli('staging:drill', async () => {
       RESOLVER_SECRET: sentinelSecret,
     });
     if (leakedWorkerKey.code !== 1 || !leakedWorkerKey.stderr.includes('Invalid configuration: RESOLVER_SECRET')) {
-      throw new Error(`expected RESOLVER_SECRET rejection on API startup, got: ${leakedWorkerKey.stderr}`);
+      throw new Error('expected RESOLVER_SECRET rejection on API startup');
     }
-    if (leakedWorkerKey.stderr.includes(sentinelSecret)) {
+    if (leakedWorkerKey.stderr.includes(sentinelSecret) || leakedWorkerKey.stdout.includes(sentinelSecret)) {
       throw new Error('RESOLVER_SECRET value leaked in API startup error');
     }
 
+    passCheck();
+
+    activeCheck = 'readinessExposedToHost';
     // 2. Clean staging startup with AI disabled + manual drafting + persistent evidence volume check
     const port = await freePort();
     const baseStagingEnv = {
@@ -242,13 +324,15 @@ await runCli('staging:drill', async () => {
       BACKEND_PORT: String(port),
       AI_ENABLED: 'false',
     };
-    api = await startStagingApi(baseStagingEnv, port);
+    api = await startStagingApi(children, baseStagingEnv, port);
     const initialStartMs = api.startMs;
 
     const health1 = await apiCall(port, '/health', {origin: null});
     if (health1.status !== 200 || health1.body.status !== 'ok' || health1.body.network !== 'testnet') {
       throw new Error('staging readiness health check failed');
     }
+
+    passCheck();
 
     const creator = Keypair.random();
     const challenge = await apiCall(port, '/auth/challenge', {
@@ -266,21 +350,31 @@ await runCli('staging:drill', async () => {
     if (verify.status !== 200 || !verify.cookie) throw new Error('auth verify failed');
     const cookie = verify.cookie;
 
+    const tradingClose = Math.floor(Date.now() / 1000) + 86_400;
+    const resolutionFields = {
+      tradingClose,
+      observationTime: tradingClose,
+      resolutionDeadline: tradingClose + 86_400,
+      yesRule: 'Settled YES on-chain',
+      noRule: 'Settled NO on-chain',
+      sources: ['https://soroban-testnet.stellar.org'],
+      unavailableDataRule: 'Resolve Invalid if the on-chain settlement data is unavailable by the resolution deadline.',
+    };
+    activeCheck = 'createDraftWithAiDisabled';
     const createdDraft = await apiCall(port, '/drafts', {
       method: 'POST',
       cookie,
       body: {
         question: 'Will Stellar Testnet settle market 1 before deadline?',
         category: 'network',
-        tradingClose: 2_000_000_000,
-        yesRule: 'Settled YES on-chain',
-        noRule: 'Settled NO on-chain',
-        sources: ['https://soroban-testnet.stellar.org'],
+        ...resolutionFields,
       },
     });
     if (createdDraft.status !== 201) throw new Error('manual draft creation failed with AI disabled');
     const draftId = createdDraft.body.id;
+    passCheck();
 
+    activeCheck = 'aiDisabledReturns503';
     const aiDisabledResp = await apiCall(port, `/drafts/${draftId}/ai-assist`, {
       method: 'POST',
       cookie,
@@ -289,22 +383,24 @@ await runCli('staging:drill', async () => {
     if (aiDisabledResp.status !== 503) {
       throw new Error(`expected 503 when AI is disabled, got ${aiDisabledResp.status}`);
     }
+    passCheck();
 
+    activeCheck = 'manualDraftingWithAiDisabled';
     const revisedDraft = await apiCall(port, `/drafts/${draftId}`, {
       method: 'PUT',
       cookie,
       body: {
         question: 'Will Stellar Testnet settle market 1 before the resolution deadline?',
         category: 'network',
-        tradingClose: 2_000_000_000,
-        yesRule: 'Settled YES on-chain',
-        noRule: 'Settled NO on-chain',
-        sources: ['https://soroban-testnet.stellar.org'],
+        ...resolutionFields,
+        expectedRevisionId: createdDraft.body.revisionId,
       },
     });
-    if (revisedDraft.status !== 200 || revisedDraft.body.revisionNumber !== 2) {
-      throw new Error('manual draft revision update failed');
+    if (revisedDraft.status !== 200 || revisedDraft.body.revisionNumber !== 2 ||
+        !Number.isSafeInteger(revisedDraft.body.revisionId) || revisedDraft.body.revisionId === createdDraft.body.revisionId) {
+      throw new Error(`manual draft revision update failed (HTTP ${revisedDraft.status})`);
     }
+    const revisionId = revisedDraft.body.revisionId;
 
     const submittedDraft = await apiCall(port, `/drafts/${draftId}/submit`, {
       method: 'POST',
@@ -312,10 +408,12 @@ await runCli('staging:drill', async () => {
       body: {},
     });
     if (submittedDraft.status !== 200 || submittedDraft.body.status !== 'submitted') {
-      throw new Error('manual draft submit failed');
+      throw new Error(`manual draft submit failed (HTTP ${submittedDraft.status})`);
     }
+    passCheck();
 
     // Populate persistent evidence volume and verify digest-bound export
+    activeCheck = 'evidenceVolumePersistedAndExported';
     const evidenceBytes = await readFile(fixtureEvidenceFile);
     await writeFile(join(evidenceVolume, `${FIXTURE_EVIDENCE_DIGEST}.json`), evidenceBytes, {flag: 'wx', mode: 0o600});
     const exportedEvidence = await exportEvidence({
@@ -324,12 +422,16 @@ await runCli('staging:drill', async () => {
       out: evidenceExportDir,
     });
 
+    if (exportedEvidence.digest !== FIXTURE_EVIDENCE_DIGEST) throw new Error('exported evidence digest mismatch');
+    passCheck();
+
     // 3. Graceful shutdown and process restart with persistent volumes intact + optional AI wired
+    activeCheck = 'restartPreservesDraftsAndSessions';
     const firstShutdown = await stopStagingApiGracefully(api, port);
     api = undefined;
 
-    aiServer = await startFixtureAiServer();
-    api = await startStagingApi({
+    aiServer = await startFixtureAiServer(tradingClose);
+    api = await startStagingApi(children, {
       ...baseStagingEnv,
       AI_ENABLED: 'true',
       AI_ENDPOINT: aiServer.endpoint,
@@ -343,58 +445,79 @@ await runCli('staging:drill', async () => {
       persistedDraft.status !== 200 ||
       persistedDraft.body.draft.status !== 'submitted' ||
       persistedDraft.body.revisions.length !== 2 ||
+      persistedDraft.body.revisions[0].id !== revisionId ||
       persistedDraft.body.revisions[0].contentHash !== revisedDraft.body.contentHash
     ) {
       throw new Error('persisted draft state did not survive process restart');
     }
+    passCheck();
 
+    activeCheck = 'wiredAiAssistWorksWhenConfigured';
     const aiDraft = await apiCall(port, '/drafts', {
       method: 'POST',
       cookie,
       body: {
         question: 'Will Testnet protocol stay current?',
         category: 'network',
-        tradingClose: 2_000_000_000,
+        tradingClose,
       },
     });
     if (aiDraft.status !== 201) throw new Error('second draft creation failed');
     const aiAssist = await apiCall(port, `/drafts/${aiDraft.body.id}/ai-assist`, {
       method: 'POST',
       cookie,
-      body: {},
+      body: {expectedRevisionId: aiDraft.body.revisionId},
     });
-    if (aiAssist.status !== 200 || aiAssist.body.suggestions.confidence !== 'high') {
-      throw new Error(`expected 200 from wired AI assist after restart, got ${aiAssist.status}`);
+    if (aiAssist.status !== 200) {
+      throw new Error(`expected HTTP 200 from wired AI assist after restart, got ${aiAssist.status}`);
     }
+    const aiRevisionId = aiAssist.body?.sourceRevision?.revisionId;
+    if (aiRevisionId !== aiDraft.body.revisionId) {
+      throw new Error(`wired AI assist revision mismatch: expected ${aiDraft.body.revisionId}, got ${aiRevisionId}`);
+    }
+    const confidence = aiAssist.body?.suggestions?.confidence;
+    if (confidence !== 'high') {
+      throw new Error(`wired AI assist confidence mismatch: expected high, got ${JSON.stringify(confidence)}`);
+    }
+    passCheck();
 
     // 4. Online backup, post-backup mutation, guarded promote refusal while running, shutdown, rollback promote, restart
+    activeCheck = 'onlineBackup';
     const tBackup = performance.now();
     const backup = await createBackup({source: dbPath, outDir: backupVolume});
     const backupMs = ms(performance.now() - tBackup);
+    passCheck();
 
     // Post-backup mutation that will be rolled back
+    activeCheck = 'postBackupMutation';
     const unwantedDraft = await apiCall(port, '/drafts', {
       method: 'POST',
       cookie,
       body: {
         question: 'Unwanted post-backup draft to roll back',
-        tradingClose: 2_000_000_000,
+        tradingClose,
       },
     });
     if (unwantedDraft.status !== 201) throw new Error('post-backup mutation failed');
+    passCheck();
 
+    activeCheck = 'verifyRestore';
     const tVerify = performance.now();
     const verified = await verifyRestore({
       backup: backup.backupPath,
       target: join(dir, 'volumes', 'restore-check-1'),
     });
     const verifyMs = ms(performance.now() - tVerify);
+    if (!verified.report.ok) throw new Error('restore verification failed');
+    passCheck();
 
     // Promote must refuse while the staging API is still running
+    activeCheck = 'rollbackRestoresExactSnapshot';
     let promoteRefusedCode = null;
     try {
       await promoteRestore({target: verified.target, active: dbPath, port});
     } catch (e) {
+      if (e.code !== 'API_RUNNING') throw e;
       promoteRefusedCode = e.code;
     }
     if (promoteRefusedCode !== 'API_RUNNING') {
@@ -405,12 +528,14 @@ await runCli('staging:drill', async () => {
     api = undefined;
 
     const promoted = await promoteRestore({target: verified.target, active: dbPath, port});
-    api = await startStagingApi(baseStagingEnv, port);
+    api = await startStagingApi(children, baseStagingEnv, port);
     const postRollbackStartMs = api.startMs;
 
     const rolledBackList = await apiCall(port, '/drafts', {cookie});
-    if (rolledBackList.status !== 200 || rolledBackList.body.drafts.length !== 2) {
-      throw new Error(`expected 2 drafts after rollback to backup snapshot, got ${rolledBackList.body?.drafts?.length}`);
+    const restoredDraftIds = rolledBackList.body.drafts?.map(draft => draft.id) ?? [];
+    if (rolledBackList.status !== 200 || restoredDraftIds.length !== 2 ||
+        !restoredDraftIds.includes(draftId) || !restoredDraftIds.includes(aiDraft.body.id)) {
+      throw new Error('rollback did not restore the two pre-backup drafts');
     }
 
     const finalStop = await stopStagingApiGracefully(api, port);
@@ -421,9 +546,9 @@ await runCli('staging:drill', async () => {
     if (!countsMatchManifest) {
       throw new Error('rolled-back database table counts do not match backup manifest');
     }
+    passCheck();
 
-    const summary = {
-      source: 'fixture',
+    summary = {
       note: 'Isolated staging deployment, restart persistence, graceful shutdown and backup rollback drill using the real backend/server.mjs process and local fixture AI transport.',
       environment: {
         node: process.version,
@@ -431,18 +556,10 @@ await runCli('staging:drill', async () => {
         schemaVersion: supportedSchemaVersion(),
       },
       checks: {
-        missingConfigNamesOnly: true,
-        partialAiConfigNamesOnly: true,
-        workerSecretRejectedOnApi: true,
-        noSecretLeakInStderr: true,
-        manualDraftingWithAiDisabled: true,
-        aiDisabledReturns503: true,
-        readinessExposedToHost: true,
-        restartPreservesDraftsAndSessions: true,
-        evidenceVolumePersistedAndExported: exportedEvidence.digest === FIXTURE_EVIDENCE_DIGEST,
-        wiredAiAssistWorksWhenConfigured: true,
+        ...Object.fromEntries(Object.entries(checkResults).map(([name, status]) => [name, status === 'passed'])),
+        noSecretLeakInStderr: ['missingConfigNamesOnly', 'partialAiConfigNamesOnly', 'workerSecretRejectedOnApi']
+          .every(name => checkResults[name] === 'passed'),
         promoteRefusedWhileApiRunning: promoteRefusedCode,
-        rollbackRestoresExactSnapshot: countsMatchManifest,
         preRestoreFilesRetained: promoted.preRestore.length,
         gracefulShutdownExitCodes: [firstShutdown.exitCode, preRollbackStop.exitCode, finalStop.exitCode],
       },
@@ -459,19 +576,52 @@ await runCli('staging:drill', async () => {
         cutoverDowntime: ms(preRollbackStop.stopMs + promoted.timingsMs.total + postRollbackStartMs),
       },
     };
-    process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
-  } finally {
-    if (api) {
-      api.child.kill();
-      await api.exited;
-    }
-    if (aiServer) {
-      await aiServer.close();
-    }
-    if (values.keep) {
-      process.stderr.write(`staging:drill: kept ${dir}\n`);
-    } else {
-      await rm(dir, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
+  } catch (error) {
+    if (activeCheck) checkResults[activeCheck] = 'failed';
+    failure = {phase, error};
+  }
+
+  for (const backend of children) {
+    try {
+      await terminateBackend(backend);
+    } catch (error) {
+      cleanupErrors.push(error);
+      // Preserve the directory and let the CLI finish even if a child cannot be reaped.
+      if (backend.child.connected) backend.child.disconnect();
+      backend.child.stdout.destroy();
+      backend.child.stderr.destroy();
+      backend.child.unref();
     }
   }
+  if (aiServer) {
+    try {
+      await aiServer.close();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (dir) {
+    if (keep || children.size) {
+      process.stderr.write(`staging:drill: kept ${dir}\n`);
+    } else {
+      try {
+        await rm(dir, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+  }
+
+  failure ??= cleanupErrors.length ? {phase: 'cleanup', error: cleanupErrors[0]} : undefined;
+  process.stdout.write(JSON.stringify({
+    source: 'fixture',
+    outcome: failure ? 'failed' : 'passed',
+    checkResults,
+    ...summary,
+    ...(failure && {
+      failure: {phase: failure.phase, message: failure.error.message},
+      cleanupErrors: cleanupErrors.map(error => error.message),
+    }),
+  }, null, 2) + '\n');
+  if (failure) throw failure.error;
 });

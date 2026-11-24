@@ -293,6 +293,8 @@ test('AC1, AC2 & AC3: clean staging deployment works with AI disabled, survives 
   const reviewerCookie = await login(reviewer);
 
   // Manual drafting and review workflow with AI disabled
+  const tradingClose = Math.floor(Date.now() / 1000) + 86_400;
+  const resolutionDeadline = tradingClose + 86_400;
   assert.equal(
     (await callApi(port, '/admin/reviewers', {
       method: 'POST',
@@ -308,10 +310,13 @@ test('AC1, AC2 & AC3: clean staging deployment works with AI disabled, survives 
     body: {
       question: 'Will XLM/USD exceed $0.50 on Testnet oracle snapshot?',
       category: 'crypto',
-      tradingClose: 2_000_000_000,
+      tradingClose,
+      observationTime: tradingClose,
+      resolutionDeadline,
       yesRule: 'Median spot > $0.50',
       noRule: 'Median spot <= $0.50',
       sources: ['Coinbase', 'Kraken', 'CoinGecko'],
+      unavailableDataRule: 'Resolve Invalid if the spot snapshot is unavailable by the resolution deadline.',
     },
   });
   assert.equal(created.status, 201);
@@ -325,13 +330,16 @@ test('AC1, AC2 & AC3: clean staging deployment works with AI disabled, survives 
   assert.equal(aiDisabled.status, 503);
 
   // Submit and approve manual draft
-  assert.equal((await callApi(port, `/drafts/${created.body.id}/submit`, {method: 'POST', cookie: creatorCookie, body: {}})).status, 200);
+  const submitted = await callApi(port, `/drafts/${created.body.id}/submit`, {method: 'POST', cookie: creatorCookie, body: {}});
+  assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
+  assert.equal(submitted.body.status, 'submitted');
   const approved = await callApi(port, `/drafts/${created.body.id}/review`, {
     method: 'POST',
     cookie: reviewerCookie,
     body: {decision: 'approved', reason: 'Clear resolution rules', expectedRevisionId: created.body.revisionId},
   });
   assert.equal(approved.status, 200);
+  assert.equal(approved.body.status, 'approved');
 
   // Graceful shutdown of process 1
   const exit1 = await run1.stopGracefully();
@@ -347,7 +355,7 @@ test('AC1, AC2 & AC3: clean staging deployment works with AI disabled, survives 
     const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     receivedModel = parsed.model;
     const suggestionPayload = JSON.stringify({
-      suggestedQuestion: 'Will XLM/USD close strictly above $0.50 UTC at 2026-12-31T00:00:00Z?',
+      suggestedQuestion: `Will XLM/USD close strictly above $0.50 at ${new Date(tradingClose * 1000).toISOString()}?`,
       suggestedYesRule: 'Median USD spot price across Coinbase, Kraken, CoinGecko > 0.50',
       suggestedNoRule: 'Median USD spot price <= 0.50',
       suggestedSources: ['Coinbase', 'Kraken', 'CoinGecko'],
@@ -376,13 +384,14 @@ test('AC1, AC2 & AC3: clean staging deployment works with AI disabled, survives 
   assert.equal(persisted.status, 200);
   assert.equal(persisted.body.draft.status, 'approved');
   assert.equal(persisted.body.reviews.length, 1);
+  assert.equal(persisted.body.reviews[0].revisionId, created.body.revisionId);
   assert.equal(persisted.body.reviews[0].approvedParamsHash, created.body.contentHash);
 
   // Verify wired AI configuration in backend/server.mjs works for an editable draft
   const draft2 = await callApi(port, '/drafts', {
     method: 'POST',
     cookie: creatorCookie,
-    body: {question: 'Will XLM rise?', tradingClose: 2_000_000_000},
+    body: {question: 'Will XLM rise?', tradingClose},
   });
   assert.equal(draft2.status, 201);
 
@@ -405,7 +414,7 @@ test('AC1, AC2 & AC3: clean staging deployment works with AI disabled, survives 
   const badDraft = await callApi(port, '/drafts', {
     method: 'POST',
     cookie: creatorCookie,
-    body: {question: 'Post-backup write to roll back', tradingClose: 2_000_000_000},
+    body: {question: 'Post-backup write to roll back', tradingClose},
   });
   assert.equal(badDraft.status, 201);
   assert.equal((await callApi(port, '/drafts', {cookie: creatorCookie})).body.drafts.length, 3);
