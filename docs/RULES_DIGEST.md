@@ -6,6 +6,8 @@ This document specifies the deterministic byte format and SHA-256 digest calcula
 
 - Draft revisions in `backend/app.mjs` continue to compute `draft_revisions.content_hash` using the legacy revision hash so existing stored revisions are never silently reinterpreted.
 - Reviewed market rules destined for publication use the versioned `revmarket.rules.v1` payload serialized with UTF-8 [RFC 8785 (JSON Canonicalization Scheme)](https://www.rfc-editor.org/rfc/rfc8785) and hashed with SHA-256 to produce a 64-character lowercase hexadecimal digest.
+- Publication intents (`publication_intents`) store `rules_digest_version` (`"revmarket.rules.v1"` for canonical intents, `"legacy.revision_content_hash"` for previously persisted pre-v5 rows) and `rules_json` (the exact canonical RFC 8785 JSON committed by the intent, or `NULL` for legacy rows) separately from `draft_revisions.content_hash` (exposed as `revisionContentHash`).
+- Incomplete approved revisions cannot issue a canonical publication intent (`409 Conflict` with `code: "incomplete_canonical_rules"` and `requiresFreshApproval: true`) until edited and freshly approved. Previously persisted legacy intents remain readable with their original `rulesDigest`, `rulesDigestVersion: "legacy.revision_content_hash"`, `canonicalRules: null`, and `requiresFreshApproval: true`, and are never silently relabeled as canonical.
 - Display-only metadata (`metadata`), local database identifiers (`id`, `draftId`, `revisionId`, `revisionNumber`), reviewer notes (`reviewNotes`, `reason`), and off-chain session/approval fields (`signature`, `origin`, `status`, `contentHash`) are excluded from the canonical rules object.
 
 ## Canonical schema fields

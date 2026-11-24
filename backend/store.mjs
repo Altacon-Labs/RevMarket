@@ -4,7 +4,7 @@ export function openStore(filename) {
   const db=new DatabaseSync(filename);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
   const version=db.prepare('PRAGMA user_version').get().user_version;
-  if(version>4){db.close();throw new Error('Database schema is newer than this backend');}
+  if(version>5){db.close();throw new Error('Database schema is newer than this backend');}
   if(version===0) db.exec(`
     BEGIN;
     CREATE TABLE users(wallet TEXT PRIMARY KEY, created_at INTEGER NOT NULL, last_login INTEGER NOT NULL);
@@ -165,6 +165,13 @@ export function openStore(filename) {
     CREATE UNIQUE INDEX publication_intents_active_revision ON publication_intents(revision_id) WHERE status='pending';
     CREATE INDEX publication_intents_draft ON publication_intents(draft_id, id DESC);
     PRAGMA user_version=4;
+    COMMIT;
+  `);
+  if(db.prepare('PRAGMA user_version').get().user_version===4) db.exec(`
+    BEGIN;
+    ALTER TABLE publication_intents ADD COLUMN rules_digest_version TEXT NOT NULL DEFAULT 'legacy.revision_content_hash';
+    ALTER TABLE publication_intents ADD COLUMN rules_json TEXT;
+    PRAGMA user_version=5;
     COMMIT;
   `);
   return db;
