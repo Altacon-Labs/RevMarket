@@ -1,6 +1,7 @@
 import {mkdir} from 'node:fs/promises';
 import {dirname} from 'node:path';
 import {createGracefulShutdown, resolveBackendConfig} from './config.mjs';
+import {writeStructuredLog} from '../shared/observability.mjs';
 
 let config;
 try {
@@ -58,7 +59,7 @@ const shutdown = createGracefulShutdown({
   shutdownTimeoutMs: config.shutdownTimeoutMs,
 });
 server.on('error', () => {
-  console.error('Backend could not listen; check local port and configuration');
+  writeStructuredLog('error',{event:'listener_failed',reasonCode:'request_failed'},line=>process.stderr.write(`${line}\n`));
   try {
     db.close();
   } catch {
@@ -68,7 +69,7 @@ server.on('error', () => {
 });
 const displayHost = config.host === '0.0.0.0' ? '127.0.0.1' : config.host;
 server.listen(config.port, config.host, () => {
-  console.log(`RevMarket backend: http://${displayHost}:${config.port}/api/health`);
+  writeStructuredLog('info',{event:'startup_complete',reasonCode:'request_completed'});
 });
 function handleSignal() {
   shutdown.stop().then(() => {

@@ -17,7 +17,7 @@ In another terminal:
 npm run dev
 ```
 
-Use `http://127.0.0.1:5173` exactly. The development server proxies `/api` to `http://127.0.0.1:3001`. Do not switch to `localhost` or a different port without updating APP_ORIGIN. Backend health is `http://127.0.0.1:3001/api/health`. Direct API writes also require the matching Origin header.
+Use `http://127.0.0.1:5173` exactly. The development server proxies `/api` to `http://127.0.0.1:3001`. Do not switch to `localhost` or a different port without updating APP_ORIGIN. Backend readiness is `http://127.0.0.1:3001/api/ready`; liveness is `/api/live`, and `/api/health` retains its compatibility response. Direct API writes also require the matching Origin header.
 
 The example environment file documents options; set them in the process environment if needed (it is not auto-loaded). `backend/server.mjs` validates configuration through `backend/config.mjs` before creating directories, opening SQLite, or listening; missing or invalid configuration fails with variable names only. Defaults in `BACKEND_ENV=local`: `BACKEND_HOST=127.0.0.1`; `BACKEND_PORT=3001`; `APP_ORIGIN=http://127.0.0.1:5173`; database `backend/data/revmarket.sqlite`. `BACKEND_DB` can override its path. In `BACKEND_ENV=staging`, `APP_ORIGIN`, `BACKEND_DB`, and `BACKEND_PORT` must be set explicitly; see [docs/STAGING.md](../docs/STAGING.md) (`npm run staging:drill`). Set `SUPER_ADMIN_WALLETS` to comma-separated Stellar G-addresses for the super-admin network panel; the backend verifies the wallet against a signed session. Set `PINATA_JWT` on the backend to enable public IPFS image pinning; never place it in a frontend `VITE_*` variable. Optional AI drafting assistance (`POST /api/drafts/:id/ai-assist`) is disabled by default (`AI_ENABLED=false`) so manual drafting and review work without AI credentials; when `AI_ENABLED=true` or any `AI_*` variable is set, `AI_ENDPOINT`, `AI_API_KEY`, and `AI_MODEL` are required and wired to `createApi`. Never set `RESOLVER_SECRET` in the backend API environment (it is rejected at startup to enforce API/worker separation). The Vite development proxy targets port 3001, so change its target when changing BACKEND_PORT.
 
@@ -39,7 +39,9 @@ The backend binds to loopback. Its terminal must keep running; Ctrl+C closes the
 
 | Method/path | Access | Behavior |
 |---|---|---|
-| GET `/api/health` | Public | Readiness/version; automationEnabled=false |
+| GET `/api/live` | Public | Process liveness without database access |
+| GET `/api/ready` | Public | SQLite readiness; returns 503 when unavailable |
+| GET `/api/health` | Public | Compatibility readiness/version; automationEnabled=false |
 | POST `/api/auth/challenge` | Matching Origin | `{wallet}`; short-lived sign-in text and challenge ID |
 | POST `/api/auth/verify` | Matching Origin | `{id,signature}`; SEP-53 base64 signature; HttpOnly session cookie |
 | GET `/api/me` | Session | Own public-key profile and creation/login timestamps |

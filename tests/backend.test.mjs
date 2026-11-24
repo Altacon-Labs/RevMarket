@@ -12,7 +12,7 @@ async function fixture(t,{rateLimit=1000,superAdminWallets=[],uploadImage}={}){
   const db=openStore(':memory:');let clock=1000;
   const server=createApi({db,appOrigin:origin,now:()=>clock,rateLimit,superAdminWallets,uploadImage});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  t.after(async()=>{await new Promise(resolve=>{server.close(resolve);server.closeAllConnections();});db.close();});
+  t.after(async()=>{await new Promise(resolve=>{server.close(resolve);server.closeAllConnections();});try{db.close();}catch{ /* already closed by the readiness failure case */ }});
   const base=`http://127.0.0.1:${server.address().port}`;
   async function call(path,{method='GET',body,form,cookie,requestOrigin=origin,headers={}}={}){
     const h={...headers};if(requestOrigin)h.Origin=requestOrigin;if(body!==undefined)h['Content-Type']='application/json';if(cookie)h.Cookie=cookie;
@@ -27,12 +27,21 @@ async function fixture(t,{rateLimit=1000,superAdminWallets=[],uploadImage}={}){
 test('backend health and request boundaries reject missing origins, malformed wallets and oversized bodies',async t=>{
   const f=await fixture(t);
   assert.equal((await f.call('/health')).body.automationEnabled,false);
+  assert.equal((await f.call('/live')).body.status,'ok');
+  assert.equal((await f.call('/ready')).body.status,'ready');
   assert.equal((await f.call('/me')).status,401);
   assert.equal((await f.call('/auth/challenge',{method:'POST',body:{wallet:Keypair.random().publicKey()},requestOrigin:null})).status,403);
   assert.equal((await f.call('/auth/challenge',{method:'POST',body:{wallet:'bad'},requestOrigin:'https://wrong.example'})).status,403);
   assert.equal((await f.call('/auth/challenge',{method:'POST',body:{wallet:'bad'}})).status,400);
   assert.equal((await f.call('/auth/challenge',{method:'POST',body:{wallet:'x'.repeat(9000)}})).status,413);
   assert.equal((await f.call('/automation/enable',{method:'POST',body:{}})).status,404);
+});
+test('liveness remains available when SQLite fails and readiness reports not ready',async t=>{
+  const f=await fixture(t);
+  f.db.close();
+  assert.equal((await f.call('/live')).status,200);
+  assert.equal((await f.call('/ready')).status,503);
+  assert.equal((await f.call('/health')).status,503);
 });
 test('SEP-53 sign-in creates only a public-key profile and hashed HttpOnly session',async t=>{
   const f=await fixture(t),key=Keypair.random(),c=await f.challenge(key);

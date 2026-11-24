@@ -5,6 +5,7 @@ import { processMarket } from './runner.mjs';
 import { createAttemptStore } from './attempts.mjs';
 import { pollDueMarkets } from './scheduler.mjs';
 import { priceObservations, eventObservations } from './providers.mjs';
+import {writeStructuredLog} from '../shared/observability.mjs';
 
 const env = process.env;
 if (!env.RESOLVER_SECRET || !env.CONTRACT_ID) throw new Error('Set RESOLVER_SECRET and CONTRACT_ID in server environment');
@@ -30,8 +31,9 @@ do {
     if (count > 1000) throw new Error('Scan limit exceeded; deploy an indexer before scaling');
     await pollDueMarkets({store:attemptStore,network:'testnet',contract:env.CONTRACT_ID,count,batchSize:Number(env.SETTLEMENT_BATCH_SIZE || 25),
       process:(id,onMarketRead)=>processMarket({client,source,sign,id,providers,saveEvidence,attemptStore,onMarketRead}),
-      onError:id=>console.error(`Market ${id}: resolution deferred; inspect providers and on-chain status`)});
-  } catch { console.error('Resolver scan failed; check configuration and RPC'); }
+      onAttempt:event=>writeStructuredLog(event.event==='worker_attempt_deferred'?'error':'info',{...event,service:'revmarket-worker'}),
+      onError:()=>{}});
+  } catch { writeStructuredLog('error',{service:'revmarket-worker',event:'worker_scan',reasonCode:'worker_scan_failed'}); }
   if (env.RUN_ONCE === '1') break;
   await new Promise(r=>setTimeout(r,10_000));
 } while(true);
