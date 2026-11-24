@@ -1,10 +1,11 @@
 import {useEffect, useRef, useState} from 'react';
 import {Navigate, Route, Routes, useLocation, useNavigate} from 'react-router-dom';
 import {createClient, normalizeMarket, sc} from '../../shared/stellar.mjs';
-import {formatAmount, parseAmount, priceUnits} from '../../shared/amount.mjs';
+import {formatAmount, parseAmount} from '../../shared/amount.mjs';
 import {connect, checkWallet, signer, getExistingAddress} from './lib/wallet.mjs';
 import PhosphorIcon from './icons/PhosphorIcon.jsx';
 import {logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import {createdMarketId, describeEscrow, prepareLegacyCreate, withLegacyArtwork} from './lib/legacy-create.mjs';
 import {MOCK_MARKETS} from './lib/mock-data.mjs';
 import Header from './components/Header.jsx';
 import Sidebar from './components/Sidebar.jsx';
@@ -43,6 +44,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const [message, setMessage] = useState('');
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+  const [escrow, setEscrow] = useState(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {return localStorage.getItem('revmarket.sidebar-collapsed') === 'true';} catch {return false;}
   });
@@ -147,6 +149,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     }
     setLastAction(result.hash);
     await refresh();
+    return result;
   }
 
   async function connectWallet() {
@@ -163,47 +166,41 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   }
 
   async function createMarket({kind, category, question, asset, target, closes, description, imageFile}) {
+    const prepared = prepareLegacyCreate({kind, category, question, asset, target, closes, description, hasArtwork: Boolean(imageFile)}, {now: Math.floor(Date.now() / 1000)});
     if (!address) throw new Error('Connect Freighter first');
-    const closesAt = Math.floor(new Date(closes).getTime() / 1000);
-    if (!Number.isSafeInteger(closesAt) || closesAt <= Math.floor(Date.now() / 1000)) throw new Error('Choose a future closing time');
-    
-    // Safely upload image if available, fallback gracefully
+
     let imageCid = '';
     if (imageFile) {
       try {
         imageCid = await uploadMarketImage(imageFile, address, () => currentSource.current === source);
-      } catch (err) {
-        // If local IPFS backend is unconfigured, provide clean fallback CID so transaction doesn't stall
-        imageCid = 'bafkreifdummyartworkcid';
+      } catch (uploadError) {
+        throw Object.assign(new Error(`Artwork upload failed (${uploadError.message}). Nothing was signed and your details are kept.`), {code: 'ARTWORK_UPLOAD'});
       }
-    } else {
-      imageCid = 'bafkreifdummyartworkcid';
     }
+    const market = withLegacyArtwork(prepared, imageCid);
 
-    const priceAsset = kind === 'price' ? asset : null;
-    const threshold = priceAsset ? priceUnits(target) : 0n;
-    const baseQuestion = priceAsset
-      ? `Will ${priceAsset} be strictly above $${target} USD at the first post-close observation (within 90 seconds)?`
-      : question;
-
-    // Embed chosen category seamlessly into the question metadata prefix: [Sports], [Crypto], [Food & Dining], etc.
-    const taggedQuestion = category && category !== 'General'
-      ? `[${category}] ${baseQuestion}`
-      : baseQuestion;
-
-    // Use description or fallback placeholder
-    const descriptionCid = description ? `desc:${encodeURIComponent(description.slice(0, 100))}` : '';
-
-    await send('create', [
+    const result = await send('create', [
       sc.address(address),
-      sc.text(taggedQuestion),
-      sc.text(descriptionCid),
-      sc.text(imageCid),
-      sc.kind(priceAsset, threshold),
-      sc.u64(closesAt)
+      sc.text(market.question),
+      sc.text(market.descriptionCid),
+      sc.text(market.imageCid),
+      sc.kind(market.priceAsset, market.threshold),
+      sc.u64(market.closesAt)
     ]);
     setShowCreate(false);
+    setMessage(`Market #${createdMarketId(result)} created. Transaction ${result.hash}`);
   }
+
+  useEffect(() => {
+    if (!showCreate || !client) return;
+    let stopped = false;
+    setEscrow(null);
+    client.deploymentToken().then(
+      token => {if (!stopped) setEscrow(describeEscrow(token));},
+      () => {if (!stopped) setEscrow({error: 'Could not read the collateral this market contract escrows. Close and reopen to retry.'});},
+    );
+    return () => {stopped = true;};
+  }, [showCreate]);
 
   useEffect(() => {
     let stopped = false;
@@ -317,6 +314,6 @@ export default function App({privyEnabled = false, ready = false, authenticated 
         <footer className="app-footer"><span>RevMarket</span></footer>
       </main>
     </div>
-    {showCreate && <CreateMarketModal busy={busy} previewMode={previewMode} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}
+    {showCreate && <CreateMarketModal busy={busy} previewMode={previewMode} escrow={escrow} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}
   </div>;
 }
