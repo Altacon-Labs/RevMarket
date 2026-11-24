@@ -4196,3 +4196,98 @@ a {
   gap: 12px;
   width: 100%;
 }
+
+.settlement-evidence {
+  display: grid;
+  gap: 16px;
+}
+
+.settlement-evidence__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+}
+
+.settlement-evidence__facts > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settlement-evidence__facts span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settlement-evidence__facts strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.settlement-evidence__outcome {
+  color: var(--green);
+}
+
+.settlement-evidence__digest {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.settlement-evidence__note,
+.settlement-evidence__disclaimer {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.settlement-evidence__disclaimer {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.evidence-file {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.evidence-file input[type="file"] {
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+}
+
+.evidence-file input[type="file"]:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.evidence-result {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.evidence-result.is-ok {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--text);
+}
+
+.evidence-result.is-bad {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--text);
+}

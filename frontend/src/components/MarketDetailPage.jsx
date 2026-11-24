@@ -5,6 +5,7 @@ import {loadMarketDetail, parseMarketId, parseMarketSide} from '../lib/market-pa
 import {fetchPriceCandles} from '../lib/market-data.mjs';
 import MarketAvatar from './MarketAvatar.jsx';
 import MiniChart from './MiniChart.jsx';
+import SettlementEvidence from './SettlementEvidence.jsx';
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 
 const chartRanges = {
@@ -19,6 +20,7 @@ export default function MarketDetailPage({
   address,
   source,
   client,
+  contractId,
   loading = false,
   authenticated,
   onConnect,
@@ -289,8 +291,12 @@ export default function MarketDetailPage({
             )}
           </section>
 
-          <section className="detail-pane">
-          </section>
+          <SettlementEvidence
+            key={market.id}
+            market={market}
+            contractId={contractId}
+            refundable={timedOut || market.status === 3}
+          />
         </div>
       </div>
     </div>
