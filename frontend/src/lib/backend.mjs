@@ -4,6 +4,8 @@ export const TESTNET_PASSPHRASE = Networks.TESTNET;
 export const NATIVE_XLM_SAC = Asset.native().contractId(Networks.TESTNET);
 export const MAINNET_NATIVE_XLM_SAC = Asset.native().contractId(Networks.PUBLIC);
 export const COLLATERAL_DECIMALS = 7;
+export const DEFAULT_API_TIMEOUT_MS = 5000;
+export const AI_ASSIST_TIMEOUT_MS = 35_000;
 
 function deterministicTestIssuer(fillByte) {
   return StrKey.encodeEd25519PublicKey(new Uint8Array(32).fill(fillByte));
@@ -516,27 +518,56 @@ export function resolveModalCollateralConfig({
   };
 }
 
-export async function api(path, {method = 'GET', body, signal} = {}) {
-  const response = await fetch('/api' + path, {
-    method,
-    credentials: 'same-origin',
-    signal: signal || AbortSignal.timeout(5000),
-    headers: body ? {'Content-Type': 'application/json'} : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  let value;
+export async function api(path, {method = 'GET', body, signal, timeoutMs = DEFAULT_API_TIMEOUT_MS, fetcher = fetch} = {}) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const abort = reason => controller.abort(reason);
+  const onExternalAbort = () => abort(signal.reason);
+  if (signal?.aborted) onExternalAbort();
+  else signal?.addEventListener('abort', onExternalAbort, {once: true});
+  const timer = timeoutMs > 0
+    ? setTimeout(() => {
+      timedOut = true;
+      const error = new Error(`Request timed out after ${timeoutMs}ms`);
+      error.name = 'TimeoutError';
+      abort(error);
+    }, timeoutMs)
+    : null;
   try {
-    value = await response.json();
-  } catch {
-    throw new Error('Activity service unavailable');
-  }
-  if (!response.ok) {
-    const error = new Error(value.error || 'Activity service error');
-    error.status = response.status;
-    error.body = value;
+    const response = await fetcher('/api' + path, {
+      method,
+      credentials: 'same-origin',
+      signal: controller.signal,
+      headers: body ? {'Content-Type': 'application/json'} : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (controller.signal.aborted) throw new Error('Request aborted while waiting for response');
+    let value;
+    try {
+      value = await response.json();
+    } catch {
+      throw new Error('Activity service unavailable');
+    }
+    if (!response.ok) {
+      const error = new Error(value.error || 'Activity service error');
+      error.status = response.status;
+      error.body = value;
+      throw error;
+    }
+    return value;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const wrapped = new Error(timedOut ? `Request timed out after ${timeoutMs}ms` : 'Request cancelled');
+      wrapped.code = timedOut ? 'timeout' : 'aborted';
+      if (timedOut) wrapped.timeoutMs = timeoutMs;
+      wrapped.cause = error;
+      throw wrapped;
+    }
     throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    signal?.removeEventListener('abort', onExternalAbort);
   }
-  return value;
 }
 
 export async function signInActivity(address, isCurrent = () => true) {
@@ -605,10 +636,13 @@ export async function reportActivity(wallet, action, txHash) {
   }
 }
 
-export async function requestAiAssist(draftId, expectedRevisionId) {
+export async function requestAiAssist(draftId, expectedRevisionId, {signal, timeoutMs = AI_ASSIST_TIMEOUT_MS, fetcher = fetch} = {}) {
   const response = await api(`/drafts/${draftId}/ai-assist`, {
     method: 'POST',
     body: {expectedRevisionId},
+    signal,
+    timeoutMs,
+    fetcher,
   });
   const source = response.sourceRevision;
   if (
@@ -631,6 +665,47 @@ export async function requestAiAssist(draftId, expectedRevisionId) {
     throw new Error('AI assistance returned an invalid current revision.');
   }
   return response;
+}
+
+export function aiAssistSourceForm({question, category, collateral}) {
+  return {question: String(question ?? '').trim(), category, collateral};
+}
+
+export function hasSameAiAssistForm(left, right) {
+  return Boolean(left && right) &&
+    left.question === right.question &&
+    left.category === right.category &&
+    left.collateral === right.collateral;
+}
+
+export function planAiAssistRevision({savedDraft, sourceForm, overwriteRevisionId}) {
+  if (!savedDraft) return {reuse: false};
+  if (overwriteRevisionId !== undefined) {
+    return {reuse: false, draftId: savedDraft.draftId, expectedRevisionId: overwriteRevisionId};
+  }
+  if (hasSameAiAssistForm(savedDraft.form, sourceForm)) {
+    return {reuse: true, draftId: savedDraft.draftId, revisionId: savedDraft.revisionId};
+  }
+  return {reuse: false, draftId: savedDraft.draftId, expectedRevisionId: savedDraft.revisionId};
+}
+
+export function describeAiAssistError(error) {
+  if (!error || error.code === 'aborted') return null;
+  if (error.code === 'timeout' || error.name === 'TimeoutError' || /timed out|timeout/i.test(String(error.message || error.body?.error || ''))) {
+    return {
+      code: 'timeout',
+      message: `AI assistance timed out after ${(error.timeoutMs || AI_ASSIST_TIMEOUT_MS) / 1000}s. Your saved draft is intact; retry or submit manually.`,
+    };
+  }
+  if (error.status === 429) {
+    const retryAfter = Number(error.body?.retryAfterSeconds);
+    const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? ` Try again in about ${retryAfter} seconds.` : '';
+    return {code: 'rate_limit', message: `AI assistance is rate limited.${wait} Your saved draft is intact; submit manually if you prefer.`};
+  }
+  if (error.status === 503 || error.status === 502 || error.body?.code === 'ai_unavailable') {
+    return {code: 'unavailable', message: 'AI assistance is disabled or unavailable right now. Your saved draft is intact; you can submit manually.'};
+  }
+  return {code: 'error', message: error.message || 'AI assistance failed; your saved draft is intact and manual submission is still available.'};
 }
 
 export function isAiAssistResultStale(result, currentDraft, currentForm) {
