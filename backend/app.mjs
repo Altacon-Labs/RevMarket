@@ -107,6 +107,10 @@ function inspectRevisionCanonicalRules(revision){
 function formatPublicationIntent(row){
   const digestVersion=row.rules_digest_version||LEGACY_RULES_DIGEST_VERSION;
   const isCanonical=digestVersion===RULES_SCHEMA && typeof row.rules_json==='string' && row.rules_json.length>0;
+  const parameters=JSON.parse(row.params_json);
+  const networkIdHex=createHash('sha256').update(row.network_passphrase).digest('hex');
+  const intentNonceHex=createHash('sha256').update(`revmarket.intent.nonce.v1:${row.id}:${row.revision_id}:${row.params_hash}`).digest('hex');
+  const policyHashHex=createHash('sha256').update(String(parameters.policyVersion||'')).digest('hex');
   return {
     id:row.id,
     draftId:row.draft_id,
@@ -124,7 +128,7 @@ function formatPublicationIntent(row){
     canonicalRulesJson:isCanonical?row.rules_json:null,
     requiresFreshApproval:!isCanonical,
     paramsHash:row.params_hash,
-    parameters:JSON.parse(row.params_json),
+    parameters,
     approvalExpiry:row.approval_expiry,
     status:row.status,
     invalidatedReason:row.invalidated_reason||null,
@@ -136,6 +140,30 @@ function formatPublicationIntent(row){
     deployed:false,
     contractAddress:null,
     txHash:null,
+    factoryDeployment:isCanonical?{
+      contract:'RevMarketFactory',
+      method:'create_market',
+      rolloutStatus:'pending_testnet_rollout',
+      creator:row.creator_wallet,
+      reviewer:row.reviewer_wallet,
+      implementationVersion:parameters.implementationVersion||null,
+      version:null,
+      wasmHash:null,
+      nonce:intentNonceHex,
+      approvalExpiresAt:row.approval_expiry,
+      reviewerEpoch:null,
+      params:{
+        networkId:networkIdHex,
+        rulesDigest:row.rules_digest,
+        metadataCid:parameters.metadataCid||`intent:${row.id}:${row.revision_id}`,
+        collateral:parameters.collateral,
+        closesAt:parameters.tradingClose,
+        resolutionDeadline:parameters.resolutionDeadline,
+        resolver:parameters.resolver,
+        resolutionPolicyHash:policyHashHex,
+        feeBps:parameters.feeBps,
+      },
+    }:null,
   };
 }
 function reconcileIntentState(db,intentId,time){

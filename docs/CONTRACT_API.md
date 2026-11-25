@@ -115,19 +115,64 @@ await client.write(user, sign, 'predict', [
 
 Do not JSON-serialize BigInt directly; use decimal strings at HTTP boundaries. Check final confirmation hashes before retrying. `keepalive` only persists TTL extensions as a submitted transaction; a simulation is insufficient. Automatic restoration is absent.
 
-## Factory version registry (`contracts/factory`)
+## Factory reviewed deployment ABI (`contracts/factory`)
 
-The first slice of the proposed factory is implemented as its own crate. It only records approved market WASM hashes. It does not deploy children, check that a WASM is installed, manage reviewers, or touch collateral.
+`contracts/factory` implements the reviewed-publication deployment boundary alongside the append-only version registry. Legacy `contracts/market` instances and outstanding legacy claims keep their existing behavior unchanged. Public Testnet rollout (uploading child market WASM, deploying the updated factory, registering versions/reviewers, and configuring the factory contract ID) is a separately identified deployment step required before the browser can enable on-chain reviewed deployment.
 
 ```rust
+struct ReviewerRole { enabled: bool, epoch: u32 }
+enum NonceState { Unused = 0, Consumed = 1, Invalidated = 2 }
+struct MarketParams {
+    network_id: BytesN<32>,
+    rules_digest: BytesN<32>,
+    metadata_cid: String,
+    collateral: Address,
+    closes_at: u64,
+    resolution_deadline: u64,
+    resolver: Address,
+    resolution_policy_hash: BytesN<32>,
+    fee_bps: u32,
+}
+struct MarketRecord {
+    address: Address,
+    creator: Address,
+    reviewer: Address,
+    reviewer_epoch: u32,
+    version: u32,
+    wasm_hash: BytesN<32>,
+    rules_digest: BytesN<32>,
+    params_hash: BytesN<32>,
+    nonce: BytesN<32>,
+    created_at: u64,
+}
+
 __constructor(operator: Address)
-approve_version(version: u32, wasm_hash: BytesN<32>)  // operator auth
-get_version(version: u32) -> Option<BytesN<32>>       // None for unknown versions
+approve_version(version: u32, wasm_hash: BytesN<32>)                       // operator auth
+get_version(version: u32) -> Option<BytesN<32>>                            // None for unknown versions
+set_creation_paused(paused: bool)                                          // operator auth
+is_creation_paused() -> bool
+set_reviewer(reviewer: Address, enabled: bool) -> ReviewerRole             // operator auth; advances epoch
+get_reviewer(reviewer: Address) -> ReviewerRole
+invalidate_creation_nonce(creator: Address, nonce: BytesN<32>)             // creator auth; terminal invalidation
+get_nonce_state(creator: Address, nonce: BytesN<32>) -> NonceState
+create_market(
+    creator: Address,
+    reviewer: Address,
+    version: u32,
+    wasm_hash: BytesN<32>,
+    nonce: BytesN<32>,
+    approval_expires_at: u64,
+    reviewer_epoch: u32,
+    params: MarketParams,
+) -> MarketRecord                                                          // creator + reviewer auth
+get_market(address: Address) -> Option<MarketRecord>
+list_markets(start: u32, limit: u32) -> Vec<MarketRecord>                  // bounded to max 50
 ```
 
 - `approve_version` rejects version `0` and an all-zero hash with `Error::Invalid` (1). Entries are append-only: a second call for the same version fails with `Error::Duplicate` (2), even with the same hash.
-- Event: topics `("approved", version)`, data `wasm_hash`.
-- Storage: the operator is in instance storage. Each `Version(u32)` entry is in persistent storage. Writes and successful reads extend the touched entry to 1,036,800 ledgers (about 60 days) once fewer than half remain, using the same `TTL` policy as the market contract. An archived entry has to be restored before it can be read again.
+- `create_market` requires both `creator` and `reviewer` authorizations over the full invocation, rejects paused factory (`Paused` = 3), unknown version (`UnknownVersion` = 4), inactive or stale-epoch reviewer (`UnauthorizedReviewer` = 5), self-review (`SelfReview` = 6), expired approval (`Expired` = 7), replayed nonce (`NonceUsed` = 8), invalidated nonce (`NonceInvalidated` = 9), wrong network ID (`WrongNetwork` = 10), mismatched WASM hash (`WasmMismatch` = 11), and invalid timing/fee/zero-hash parameters (`Invalid` = 1) before any state mutation or child deployment.
+- Events: `("approved", version) -> wasm_hash`, `("paused",) -> paused`, `("rev_role", reviewer) -> (enabled, epoch)`, `("nonce_inv", creator) -> nonce`, `("mkt_new", address) -> (creator, reviewer, version, wasm_hash, rules_digest, params_hash)`.
+- Storage: operator, pause flag, and market count live in instance storage; `Version(u32)`, `Reviewer(Address)`, `Nonce(Address, BytesN<32>)`, `Market(Address)`, and `MarketAt(u32)` live in persistent storage with `TTL` (1,036,800 ledgers) extension on writes and successful reads.
 
 ## Proposed v2 API — design contract, not implemented ABI
 
