@@ -224,7 +224,7 @@ try {
       },
       advanceClose(id) {
         const market = markets.get(id);
-        market.closes_at = BigInt(Math.floor(Date.now() / 1000) - 5);
+        market.closes_at = BigInt(baseNow - 5);
       },
       advanceDeadline(id) {
         const market = markets.get(id);
