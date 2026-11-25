@@ -332,10 +332,10 @@ try {
 
   await page.evaluate(() => window.__REVMARKET_E2E__.advanceClose(1));
   await page.getByRole('button', {name: 'My positions'}).click();
-  await page.getByRole('button', {name: 'Refresh'}).click();
+  await page.getByRole('button', {name: 'Refresh', exact: true}).click();
   await page.getByRole('button', {name: 'Request'}).click();
   await page.evaluate(() => window.__REVMARKET_E2E__.resolve(1));
-  await page.getByRole('button', {name: 'Refresh'}).click();
+  await page.getByRole('button', {name: 'Refresh', exact: true}).click();
 
   await navigate(page, '/event/will-browser-fixture-market-settle-yes#1');
   await page.locator('[data-testid="settlement-evidence"]').waitFor();
@@ -393,7 +393,7 @@ try {
     throw new Error(`Verified activity / stale checkpoint assertion failed: ${JSON.stringify(verifiedActivity)}`);
   }
   await page.getByRole('button', {name: 'My positions'}).click();
-  await page.getByRole('button', {name: 'Refresh'}).click();
+  await page.getByRole('button', {name: 'Refresh', exact: true}).click();
   await page.getByRole('button', {name: 'Claim'}).click();
 
   // Timeout refund path.
@@ -401,7 +401,7 @@ try {
   await page.getByRole('button', {name: 'Confirm position'}).click();
   await page.evaluate(() => window.__REVMARKET_E2E__.advanceDeadline(2));
   await page.getByRole('button', {name: 'My positions'}).click();
-  await page.getByRole('button', {name: 'Refresh'}).click();
+  await page.getByRole('button', {name: 'Refresh', exact: true}).click();
   await page.getByRole('button', {name: 'Claim'}).click();
 
   // Wallet rejection must remain visible and must not create a position.
@@ -415,7 +415,7 @@ try {
   await page.getByRole('button', {name: 'Verify super-admin access'}).click();
   await page.getByText('Super admin', {exact: true}).waitFor();
   await page.route('**/api/admin/reviewers', route => route.abort());
-  await page.getByRole('button', {name: 'Refresh'}).click();
+  await page.getByRole('button', {name: 'Refresh', exact: true}).click();
   await page.locator('.form-error').waitFor();
 
   console.log('Browser fixture scenarios passed: Settings/session switching; reviewer add; creator submit/reviewer decision/publication-intent reload; legacy position/settlement/evidence/claim; timeout refund; deterministic event ingestion/stale checkpoint; wallet rejection; reviewer API outage.');
