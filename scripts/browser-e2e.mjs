@@ -1,8 +1,16 @@
+import {createHash} from 'node:crypto';
+import {mkdtemp, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Keypair} from '@stellar/stellar-sdk';
+import {Keypair, Networks, nativeToScVal, xdr} from '@stellar/stellar-sdk';
 import {chromium} from 'playwright';
+import {openStore} from '../backend/store.mjs';
+import {createMarketEventIngestor} from '../backend/indexer.mjs';
+import {DEFAULT_VERIFIED_ACTIVITY_CONTRACT_ID} from '../backend/verified-activity.mjs';
+import {sc} from '../shared/stellar.mjs';
 
 const origin = 'http://127.0.0.1:5173';
 const admin = Keypair.random();
@@ -49,8 +57,17 @@ async function waitFor(url, child, timeoutMs = 30_000) {
   throw new Error(`Timed out waiting for ${url}: ${lastError || child.output()}`);
 }
 
+async function navigate(page, path) {
+  await page.evaluate(nextPath => {
+    window.history.pushState({}, '', nextPath);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }, path);
+}
+
 async function switchWallet(page, address) {
-  await page.goto(`${origin}/settings`);
+  if (new URL(page.url()).pathname !== '/settings') {
+    await page.getByRole('button', {name: 'Settings'}).click();
+  }
   await page.evaluate(() => { window.__REVMARKET_E2E__.wallet.connected = false; });
   await page.getByRole('button', {name: 'Disconnect Freighter'}).click();
   await page.evaluate(next => {
@@ -72,17 +89,24 @@ async function api(page, path, {method = 'GET', body} = {}) {
   }, {path, method, body});
 }
 
+const contractId = DEFAULT_VERIFIED_ACTIVITY_CONTRACT_ID;
+const tempDir = await mkdtemp(join(tmpdir(), 'revmarket-browser-e2e-'));
+const dbPath = join(tempDir, 'revmarket.sqlite');
+const db = openStore(dbPath);
 const backend = start(process.execPath, ['--experimental-sqlite', 'backend/server.mjs'], {
   BACKEND_ENV: 'local',
-  BACKEND_DB: ':memory:',
+  BACKEND_DB: dbPath,
   BACKEND_HOST: '127.0.0.1',
   BACKEND_PORT: '3001',
   APP_ORIGIN: origin,
   AI_ENABLED: 'false',
   SUPER_ADMIN_WALLETS: admin.publicKey(),
+  CONTRACT_ID: contractId,
+  INDEXER_STALE_AFTER_SECONDS: '120',
 });
 const frontend = start('npm', ['run', 'dev', '--workspace', 'frontend', '--', '--host', '127.0.0.1', '--port', '5173', '--strictPort'], {
   VITE_E2E_TEST_MODE: 'true',
+  VITE_CONTRACT_ID: contractId,
 });
 
 let browser;
@@ -95,8 +119,19 @@ try {
   const page = await context.newPage();
   page.setDefaultTimeout(12_000);
 
-  await page.addInitScript(({initialWallet}) => {
-    const now = Math.floor(Date.now() / 1000);
+  const fixtureNow = Math.floor(Date.now() / 1000);
+  const evidenceText = JSON.stringify({
+    version: 1,
+    contractId,
+    marketId: 1,
+    question: 'Will browser fixture market settle YES?',
+    closesAt: fixtureNow - 5,
+    observations: [{source: 'deterministic-browser-fixture', value: 'YES'}],
+    decision: {outcome: 0, confidence: 9500},
+  });
+  const evidenceDigest = createHash('sha256').update(evidenceText).digest('hex');
+  await page.addInitScript(({initialWallet, baseNow, evidenceDigest}) => {
+    const now = baseNow;
     const markets = new Map();
     for (const [id, question] of [
       [0, 'Unused browser fixture baseline market'],
@@ -201,11 +236,11 @@ try {
         market.status = 2;
         market.outcome = 0;
         market.confidence = 9500;
-        market.evidence = new Uint8Array(32).fill(7);
+        market.evidence = Uint8Array.from(evidenceDigest.match(/.{2}/g), byte => Number.parseInt(byte, 16));
       },
     };
     window.__REVMARKET_E2E__ = state;
-  }, {initialWallet: admin.publicKey()});
+  }, {initialWallet: admin.publicKey(), baseNow: fixtureNow, evidenceDigest});
 
   await page.route('**/api/auth/challenge', async route => {
     const response = await route.fetch();
@@ -272,42 +307,104 @@ try {
   await switchWallet(page, creator.publicKey());
   await page.getByRole('button', {name: 'Verify super-admin access'}).click();
   await page.getByText('Not authorized', {exact: true}).waitFor();
-  await page.goto(`${origin}/drafts/${draftId}/publish`);
+  await navigate(page, `/drafts/${draftId}/publish`);
   await page.getByTestId('intent-status-pill').getByText('PENDING').waitFor();
   const intentHeading = await page.locator('h1').textContent();
   const intentId = Number(intentHeading.match(/#(\d+)/)?.[1]);
   if (!intentId) throw new Error(`Could not read created publication intent: ${intentHeading}`);
-  await page.goto(`${origin}/publication-intents/${intentId}`);
-  await page.getByTestId('intent-status-pill').getByText('PENDING').waitFor();
+  const reloadedPage = await context.newPage();
+  await reloadedPage.goto(`${origin}/publication-intents/${intentId}`);
+  await reloadedPage.getByTestId('intent-status-pill').waitFor();
+  if (!(await reloadedPage.getByTestId('intent-status-pill').textContent()).includes('PENDING')) {
+    throw new Error('Publication intent did not persist as pending after a fresh browser page load');
+  }
+  await reloadedPage.close();
 
   // Browser legacy-market lifecycle: take a position, request settlement, resolve, then claim.
   await switchWallet(page, trader.publicKey());
   await page.getByRole('button', {name: 'Verify super-admin access'}).click();
   await page.getByText('Not authorized', {exact: true}).waitFor();
-  await page.goto(`${origin}/markets`);
+  await page.getByRole('button', {name: 'All markets'}).click();
   const firstCard = page.locator('.market-card').filter({hasText: 'Will browser fixture market settle YES?'});
   await firstCard.getByRole('button', {name: 'YES'}).click();
   await page.getByRole('button', {name: 'Confirm position'}).click();
   await page.getByText(/Confirmed: fixture-predict-1/).waitFor();
 
   await page.evaluate(() => window.__REVMARKET_E2E__.advanceClose(1));
-  await page.goto(`${origin}/positions`);
+  await page.getByRole('button', {name: 'My positions'}).click();
   await page.getByRole('button', {name: 'Refresh'}).click();
   await page.getByRole('button', {name: 'Request'}).click();
   await page.evaluate(() => window.__REVMARKET_E2E__.resolve(1));
+
+  await navigate(page, '/event/will-browser-fixture-market-settle-yes#1');
+  await page.locator('[data-testid="settlement-evidence"]').waitFor();
+  await page.locator('[data-testid="settlement-evidence"] input[type="file"]').setInputFiles({
+    name: 'fixture-evidence.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(evidenceText),
+  });
+  await page.getByText(/Integrity verified/).waitFor();
+
+  // Exercise the real indexer against a deterministic RPC page, then assert the API
+  // reports the event and correctly marks an old checkpoint as stale.
+  const indexedAt = Math.floor(Date.now() / 1000);
+  const event = {
+    type: 'contract',
+    id: 'browser-fixture-predict-1',
+    ledger: 1201,
+    ledgerClosedAt: new Date(indexedAt * 1000).toISOString(),
+    txHash: createHash('sha256').update('browser-fixture-predict').digest('hex'),
+    contractId,
+    topic: [nativeToScVal('predict', {type: 'symbol'}), sc.u32(1)],
+    value: xdr.ScVal.scvVec([sc.address(trader.publicKey()), sc.u32(0), sc.i128(10_000_000n)]),
+  };
+  let eventPageReturned = false;
+  const ingestor = createMarketEventIngestor({
+    db,
+    contractId,
+    rpcClient: {
+      async getNetwork() { return {passphrase: Networks.TESTNET, protocolVersion: 30}; },
+      async getEvents() {
+        if (eventPageReturned) {
+          return {oldestLedger: 1000, latestLedger: 1201, cursor: 'browser-fixture-cursor-2', events: []};
+        }
+        eventPageReturned = true;
+        return {oldestLedger: 1000, latestLedger: 1201, cursor: 'browser-fixture-cursor-1', events: [event]};
+      },
+    },
+    startLedger: 1201,
+    pageLimit: 10,
+    maxPages: 3,
+    now: () => indexedAt,
+  });
+  const ingestion = await ingestor.sync();
+  if (ingestion.status !== 'ok' || ingestion.insertedCount !== 1) {
+    throw new Error(`Fixture event ingestion failed: ${JSON.stringify(ingestion)}`);
+  }
+  db.prepare('UPDATE ingestion_checkpoints SET updated_at = ? WHERE network_passphrase = ? AND contract_id = ?')
+    .run(indexedAt - 600, Networks.TESTNET, contractId);
+  const verifiedActivity = await api(page, '/api/activity/verified');
+  if (
+    verifiedActivity.status !== 200 ||
+    !verifiedActivity.body.items.some(item => item.eventId === event.id) ||
+    verifiedActivity.body.freshness.stale !== true
+  ) {
+    throw new Error(`Verified activity / stale checkpoint assertion failed: ${JSON.stringify(verifiedActivity)}`);
+  }
+  await page.getByRole('button', {name: 'My positions'}).click();
   await page.getByRole('button', {name: 'Refresh'}).click();
   await page.getByRole('button', {name: 'Claim'}).click();
 
   // Timeout refund path.
-  await page.goto(`${origin}/event/will-browser-fixture-timeout-refund-work#2`);
+  await navigate(page, '/event/will-browser-fixture-timeout-refund-work#2');
   await page.getByRole('button', {name: 'Confirm position'}).click();
   await page.evaluate(() => window.__REVMARKET_E2E__.advanceDeadline(2));
-  await page.goto(`${origin}/positions`);
+  await page.getByRole('button', {name: 'My positions'}).click();
   await page.getByRole('button', {name: 'Refresh'}).click();
   await page.getByRole('button', {name: 'Claim'}).click();
 
   // Wallet rejection must remain visible and must not create a position.
-  await page.goto(`${origin}/event/will-browser-fixture-reject-a-wallet-signature#3`);
+  await navigate(page, '/event/will-browser-fixture-reject-a-wallet-signature#3');
   await page.evaluate(() => { window.__REVMARKET_E2E__.wallet.rejectNextSign = true; });
   await page.getByRole('button', {name: 'Confirm position'}).click();
   await page.locator('.status-message').getByText(/Wallet signature declined/).waitFor();
@@ -320,7 +417,7 @@ try {
   await page.getByRole('button', {name: 'Refresh'}).click();
   await page.locator('.form-error').waitFor();
 
-  console.log('Browser fixture scenarios passed: Settings/session switching; reviewer add; creator submit/reviewer decision/publication-intent reload; legacy position/settlement/claim; timeout refund; wallet rejection; reviewer API outage.');
+  console.log('Browser fixture scenarios passed: Settings/session switching; reviewer add; creator submit/reviewer decision/publication-intent reload; legacy position/settlement/evidence/claim; timeout refund; deterministic event ingestion/stale checkpoint; wallet rejection; reviewer API outage.');
 } finally {
   if (browser) await browser.close();
   for (const child of children.reverse()) {
@@ -330,4 +427,6 @@ try {
       if (child.exitCode === null) child.kill('SIGKILL');
     }
   }
+  db.close();
+  await rm(tempDir, {recursive: true, force: true});
 }
