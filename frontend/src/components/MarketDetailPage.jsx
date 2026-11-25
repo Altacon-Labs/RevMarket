@@ -298,6 +298,58 @@ export default function MarketDetailPage({
             refundable={timedOut || market.status === 3}
           />
         </div>
+        <aside className="detail-trade-column">
+          <section className="trade-panel" aria-label="Trade this market">
+            <p className="eyebrow">LEGACY ON-CHAIN MARKET</p>
+            <h2>{position && BigInt(position.amount) > 0n ? 'Your position' : 'Take a position'}</h2>
+            {position && BigInt(position.amount) > 0n ? (
+              <div className="position-note" role="status">
+                You hold <strong>{position.side === 0 ? 'YES' : 'NO'}</strong> with {formatAmount(position.amount)} XLM staked.
+              </div>
+            ) : canPredict && isUserConnected ? (
+              <form className="detail-trade-form" onSubmit={event => {event.preventDefault(); onPredict(market.id, side, amount);}}>
+                <div className="trade-outcome yes-outcome">
+                  <span>YES pool share</span><strong>{yesShare.toFixed(2)}%</strong>
+                </div>
+                <div className="trade-outcome no-outcome">
+                  <span>NO pool share</span><strong>{noShare.toFixed(2)}%</strong>
+                </div>
+                <div className="segmented-control" role="group" aria-label="Choose an outcome">
+                  <button type="button" className={side === 0 ? 'yes-selected' : ''} aria-pressed={side === 0} onClick={() => setSide(0)}>YES</button>
+                  <button type="button" className={side === 1 ? 'no-selected' : ''} aria-pressed={side === 1} onClick={() => setSide(1)}>NO</button>
+                </div>
+                <label className="amount-input">
+                  <span>Stake</span>
+                  <input aria-label="Stake amount in XLM" type="number" min="0.1" step="0.1" value={amount} onChange={event => setAmount(event.target.value)} />
+                  <span>XLM</span>
+                </label>
+                <p className="position-note">Estimated shares: <strong>{estShares}</strong> · Estimated payout: <strong>{estPayout}</strong></p>
+                <button type="submit" className="button button-primary market-submit" disabled={busy || numericAmount <= 0}>Confirm position</button>
+              </form>
+            ) : canPredict && !isUserConnected && isUserSignedIn ? (
+              <div className="detail-trade-form">
+                <p className="position-note">Connect Freighter to approve a Stellar Testnet transaction.</p>
+                <button type="button" className="button button-primary market-submit" disabled={busy} onClick={onConnect}>Connect Freighter</button>
+              </div>
+            ) : !canPlaceOrder ? (
+              <p className="preview-note">Sign in and connect a Testnet wallet to trade this market.</p>
+            ) : timedOut || market.status === 3 ? (
+              <p className="position-note">This market is refundable. Any unclaimed position can be claimed below.</p>
+            ) : closed && market.status === 0 ? (
+              <p className="position-note">Trading is closed. The market can now request resolution.</p>
+            ) : (
+              <p className="preview-note">This market is not accepting new positions.</p>
+            )}
+            {market.status === 0 && closed && !timedOut && (
+              <button type="button" className="button button-secondary market-submit" disabled={busy} onClick={() => onRequest(market.id)}>Request resolution</button>
+            )}
+            {canClaim && (
+              <button type="button" className="button button-primary market-submit" disabled={busy} onClick={() => onClaim(market.id)}>
+                Claim {market.status === 2 ? 'payout' : 'refund'}
+              </button>
+            )}
+          </section>
+        </aside>
       </div>
     </div>
   );

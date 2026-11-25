@@ -540,11 +540,14 @@ export async function api(path, {method = 'GET', body, signal} = {}) {
 }
 
 export async function signInActivity(address, isCurrent = () => true) {
-  const [freighter, {checkWallet}] = await Promise.all([
-    import('@stellar/freighter-api'),
+  const [{checkWallet}, freighter] = await Promise.all([
     import('./wallet.mjs'),
+    import('@stellar/freighter-api'),
   ]);
-  const signMessage = freighter.signMessage || freighter.default?.signMessage;
+  const fixtureWallet = import.meta.env?.VITE_E2E_TEST_MODE === 'true'
+    ? window.__REVMARKET_E2E__?.wallet
+    : null;
+  const signMessage = fixtureWallet?.signMessage || freighter.signMessage || freighter.default?.signMessage;
   await checkWallet(address);
   const challenge = await api('/auth/challenge', {method: 'POST', body: {wallet: address}});
   const prefix = `RevMarket sign-in\nOrigin: ${window.location.origin}\nNetwork: Stellar Testnet\nWallet: ${address}\n`;

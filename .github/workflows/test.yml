@@ -37,6 +37,17 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Install pinned Playwright runner
+        run: npm install --no-save --no-package-lock playwright@1.56.1
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser fixture scenarios
+        run: npm run test:browser
+        env:
+          CI: "true"
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
