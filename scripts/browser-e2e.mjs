@@ -99,6 +99,7 @@ try {
     const now = Math.floor(Date.now() / 1000);
     const markets = new Map();
     for (const [id, question] of [
+      [0, 'Unused browser fixture baseline market'],
       [1, 'Will browser fixture market settle YES?'],
       [2, 'Will browser fixture timeout refund work?'],
       [3, 'Will browser fixture reject a wallet signature?'],
