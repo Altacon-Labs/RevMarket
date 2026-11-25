@@ -2,13 +2,19 @@
   "name": "revmarket-stellar",
   "version": "0.1.0",
   "license": "MIT",
-  "engines": {"node": ">=22.12.0"},
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "private": true,
   "type": "module",
-  "workspaces": ["frontend", "backend", "service"],
+  "workspaces": [
+    "frontend",
+    "backend",
+    "service"
+  ],
   "scripts": {
     "test": "node --experimental-sqlite --test tests/*.test.mjs",
-    "test:browser": "node scripts/browser-e2e.mjs",
+    "test:browser": "node --experimental-sqlite scripts/browser-e2e.mjs",
     "backend": "node --experimental-sqlite backend/server.mjs",
     "ingest": "node --experimental-sqlite backend/ingest.mjs",
     "check:icons": "node scripts/check-icons.mjs",
