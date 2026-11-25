@@ -2,6 +2,19 @@
 
 The automated browser suite uses a deterministic wallet and RPC fixture. It does **not** connect to Freighter, submit transactions, or claim live-chain evidence.
 
+## Automated fixture command
+
+From the repository root:
+
+```sh
+npm ci
+npm install --no-save --no-package-lock playwright@1.56.1
+npx playwright install --with-deps chromium
+npm run test:browser
+```
+
+The browser runner starts the local API on port 3001 and the Vite client on port 5173, uses a disposable SQLite database, and injects deterministic wallet/RPC and provider fixtures. CI runs this command after the existing JavaScript tests and frontend build. The runner prints one summary line when all fixture scenarios pass; the authoritative result is the JavaScript CI job for the PR commit. This environment has not executed that CI job.
+
 Run the manual check only with a disposable Testnet wallet and the current deployment details.
 
 - [ ] Network selected in Freighter: Stellar Testnet
