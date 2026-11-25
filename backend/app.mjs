@@ -1,6 +1,7 @@
 import {createServer} from 'node:http';
 import {createHash,randomBytes} from 'node:crypto';
 import {correlationId,writeStructuredLog} from '../shared/observability.mjs';
+import {RULES_SCHEMA,encodeRulesV1} from '../shared/rules-digest.mjs';
 import {File} from 'node:buffer';
 import {Keypair,Networks,StrKey} from '@stellar/stellar-sdk';
 import {DEFAULT_STALE_AFTER_SECONDS,queryVerifiedWalletActivity,validateVerifiedActivityConfig} from './verified-activity.mjs';
@@ -20,6 +21,7 @@ const maxImageBytes=5*1024*1024;
 const cidPattern=/^bafy[a-z2-7]{20,}$/;
 const targetNetwork='testnet';
 const targetNetworkPassphrase=Networks.TESTNET;
+const LEGACY_RULES_DIGEST_VERSION='legacy.revision_content_hash';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const contentHash=obj=>createHash('sha256').update(JSON.stringify(obj,Object.keys(obj).sort())).digest('hex');
 const canonicalJson=value=>{
@@ -57,7 +59,58 @@ function buildIntentParams(revision){
     implementationVersion:revision.implementation_version||'',
   };
 }
+function buildRulesV1Input(revision){
+  let sources=[];
+  try{
+    const parsed=JSON.parse(revision.sources_json||'[]');
+    if(Array.isArray(parsed))sources=parsed;
+  }catch{sources=[];}
+  return {
+    schema:RULES_SCHEMA,
+    network:targetNetwork,
+    question:revision.question,
+    category:revision.category,
+    tradingClose:revision.trading_close,
+    observationTime:revision.observation_time??null,
+    resolutionDeadline:revision.resolution_deadline,
+    yesRule:revision.yes_rule,
+    noRule:revision.no_rule,
+    equalityRule:revision.equality_rule===''||revision.equality_rule===null||revision.equality_rule===undefined?null:revision.equality_rule,
+    sources,
+    fallbackRule:revision.fallback_rule===''||revision.fallback_rule===null||revision.fallback_rule===undefined?null:revision.fallback_rule,
+    unavailableDataRule:revision.unavailable_data_rule,
+    collateral:revision.collateral,
+    feeBps:revision.fee_bps,
+    resolver:revision.resolver,
+    policyVersion:revision.policy_version,
+    implementationVersion:revision.implementation_version,
+  };
+}
+function inspectRevisionCanonicalRules(revision){
+  try{
+    const encoded=encodeRulesV1(buildRulesV1Input(revision));
+    return {
+      rulesDigest:encoded.digest,
+      rulesDigestVersion:RULES_SCHEMA,
+      canonicalRulesReady:true,
+      canonicalRulesError:null,
+    };
+  }catch(err){
+    return {
+      rulesDigest:null,
+      rulesDigestVersion:null,
+      canonicalRulesReady:false,
+      canonicalRulesError:err instanceof Error?err.message:String(err),
+    };
+  }
+}
 function formatPublicationIntent(row){
+  const digestVersion=row.rules_digest_version||LEGACY_RULES_DIGEST_VERSION;
+  const isCanonical=digestVersion===RULES_SCHEMA && typeof row.rules_json==='string' && row.rules_json.length>0;
+  const parameters=JSON.parse(row.params_json);
+  const networkIdHex=createHash('sha256').update(row.network_passphrase).digest('hex');
+  const intentNonceHex=createHash('sha256').update(`revmarket.intent.nonce.v1:${row.id}:${row.revision_id}:${row.params_hash}`).digest('hex');
+  const policyHashHex=createHash('sha256').update(String(parameters.policyVersion||'')).digest('hex');
   return {
     id:row.id,
     draftId:row.draft_id,
@@ -69,8 +122,13 @@ function formatPublicationIntent(row){
     targetNetwork:row.target_network,
     networkPassphrase:row.network_passphrase,
     rulesDigest:row.rules_digest,
+    rulesDigestVersion:digestVersion,
+    revisionContentHash:row.revision_content_hash||null,
+    canonicalRules:isCanonical?JSON.parse(row.rules_json):null,
+    canonicalRulesJson:isCanonical?row.rules_json:null,
+    requiresFreshApproval:!isCanonical,
     paramsHash:row.params_hash,
-    parameters:JSON.parse(row.params_json),
+    parameters,
     approvalExpiry:row.approval_expiry,
     status:row.status,
     invalidatedReason:row.invalidated_reason||null,
@@ -82,11 +140,35 @@ function formatPublicationIntent(row){
     deployed:false,
     contractAddress:null,
     txHash:null,
+    factoryDeployment:isCanonical?{
+      contract:'RevMarketFactory',
+      method:'create_market',
+      rolloutStatus:'pending_testnet_rollout',
+      creator:row.creator_wallet,
+      reviewer:row.reviewer_wallet,
+      implementationVersion:parameters.implementationVersion||null,
+      version:null,
+      wasmHash:null,
+      nonce:intentNonceHex,
+      approvalExpiresAt:row.approval_expiry,
+      reviewerEpoch:null,
+      params:{
+        networkId:networkIdHex,
+        rulesDigest:row.rules_digest,
+        metadataCid:parameters.metadataCid||`intent:${row.id}:${row.revision_id}`,
+        collateral:parameters.collateral,
+        closesAt:parameters.tradingClose,
+        resolutionDeadline:parameters.resolutionDeadline,
+        resolver:parameters.resolver,
+        resolutionPolicyHash:policyHashHex,
+        feeBps:parameters.feeBps,
+      },
+    }:null,
   };
 }
 function reconcileIntentState(db,intentId,time){
   const row=db.prepare(`
-    SELECT pi.*, r.revision_number, d.status AS draft_status, d.current_revision_id, rv.revoked_at AS reviewer_revoked_at
+    SELECT pi.*, r.revision_number, r.content_hash AS revision_content_hash, d.status AS draft_status, d.current_revision_id, rv.revoked_at AS reviewer_revoked_at
     FROM publication_intents pi
     JOIN drafts d ON d.id=pi.draft_id
     JOIN draft_revisions r ON r.id=pi.revision_id
@@ -485,7 +567,31 @@ export function createApi(options={}){
           // Owners and active reviewers can view drafts
           const reviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
           if(draft.ownerWallet!==wallet&&!reviewer&&!superAdmins.has(wallet))throw new ApiError(403,'Access denied');
-          const revisions=db.prepare('SELECT id,revision_number AS revisionNumber,question,category,metadata_json AS metadataJson,trading_close AS tradingClose,observation_time AS observationTime,resolution_deadline AS resolutionDeadline,yes_rule AS yesRule,no_rule AS noRule,equality_rule AS equalityRule,sources_json AS sourcesJson,fallback_rule AS fallbackRule,unavailable_data_rule AS unavailableDataRule,collateral,fee_bps AS feeBps,resolver,policy_version AS policyVersion,implementation_version AS implementationVersion,content_hash AS contentHash,created_at AS createdAt FROM draft_revisions WHERE draft_id=? ORDER BY revision_number DESC').all(draftId);
+          const rawRevisions=db.prepare('SELECT id,revision_number,question,category,metadata_json,trading_close,observation_time,resolution_deadline,yes_rule,no_rule,equality_rule,sources_json,fallback_rule,unavailable_data_rule,collateral,fee_bps,resolver,policy_version,implementation_version,content_hash,created_at FROM draft_revisions WHERE draft_id=? ORDER BY revision_number DESC').all(draftId);
+          const revisions=rawRevisions.map(r=>({
+            id:r.id,
+            revisionNumber:r.revision_number,
+            question:r.question,
+            category:r.category,
+            metadataJson:r.metadata_json,
+            tradingClose:r.trading_close,
+            observationTime:r.observation_time,
+            resolutionDeadline:r.resolution_deadline,
+            yesRule:r.yes_rule,
+            noRule:r.no_rule,
+            equalityRule:r.equality_rule,
+            sourcesJson:r.sources_json,
+            fallbackRule:r.fallback_rule,
+            unavailableDataRule:r.unavailable_data_rule,
+            collateral:r.collateral,
+            feeBps:r.fee_bps,
+            resolver:r.resolver,
+            policyVersion:r.policy_version,
+            implementationVersion:r.implementation_version,
+            contentHash:r.content_hash,
+            createdAt:r.created_at,
+            ...inspectRevisionCanonicalRules(r),
+          }));
           const reviews=db.prepare('SELECT id,revision_id AS revisionId,reviewer_wallet AS reviewerWallet,decision,reason,approved_params_hash AS approvedParamsHash,expiry,created_at AS createdAt FROM review_decisions WHERE draft_id=? ORDER BY id DESC').all(draftId);
           return send(200,{draft,revisions,reviews});
         }
@@ -663,32 +769,53 @@ export function createApi(options={}){
             }
             const params=buildIntentParams(revision);
             assertMatchingIntentRequest(body,revision,params);
+            let encodedRules;
+            try{
+              encodedRules=encodeRulesV1(buildRulesV1Input(revision));
+            }catch(err){
+              throw new ApiError(409,`Approved revision is incomplete for canonical ${RULES_SCHEMA} publication (${err.message}); edit the draft and obtain a fresh approval`,{
+                code:'incomplete_canonical_rules',
+                rulesDigestVersion:RULES_SCHEMA,
+                requiresFreshApproval:true,
+                detail:err.message,
+              });
+            }
             const existingActive=db.prepare("SELECT id FROM publication_intents WHERE revision_id=? AND status='pending'").get(revision.id);
             if(existingActive){
               const reconciled=reconcileIntentState(db,existingActive.id,time);
               if(reconciled && reconciled.status==='pending'){
+                if(reconciled.rulesDigestVersion!==RULES_SCHEMA){
+                  throw new ApiError(409,'Existing publication intent uses a legacy revision hash and cannot be relabeled as canonical; edit the draft and obtain a fresh approval',{
+                    code:'legacy_publication_intent',
+                    intentId:reconciled.id,
+                    rulesDigestVersion:reconciled.rulesDigestVersion,
+                    requiresFreshApproval:true,
+                  });
+                }
                 db.exec('COMMIT');
                 return send(200,{intent:reconciled,reused:true});
               }
             }
             const paramsJson=canonicalJson(params);
             const paramsDigest=hash(paramsJson);
-            const rulesDigest=revision.content_hash;
+            const rulesDigest=encodedRules.digest;
+            const rulesDigestVersion=RULES_SCHEMA;
+            const rulesJson=encodedRules.json;
             const insert=db.prepare(`
               INSERT INTO publication_intents(
                 draft_id,revision_id,review_decision_id,creator_wallet,reviewer_wallet,
-                target_network,network_passphrase,rules_digest,params_hash,params_json,
+                target_network,network_passphrase,rules_digest,rules_digest_version,rules_json,params_hash,params_json,
                 approval_expiry,status,created_at,updated_at
-              ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)
+              ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)
             `).run(
               draftId,revision.id,approval.id,wallet,approval.reviewer_wallet,
-              targetNetwork,targetNetworkPassphrase,rulesDigest,paramsDigest,paramsJson,
+              targetNetwork,targetNetworkPassphrase,rulesDigest,rulesDigestVersion,rulesJson,paramsDigest,paramsJson,
               approval.expiry,time,time
             );
             const intentId=Number(insert.lastInsertRowid);
             db.prepare('INSERT INTO audit_events(draft_id,actor_wallet,action,detail_json,created_at) VALUES(?,?,?,?,?)').run(
               draftId,wallet,'publication_intent_created',
-              JSON.stringify({intentId,revisionId:revision.id,reviewDecisionId:approval.id,rulesDigest,paramsHash:paramsDigest,targetNetwork,approvalExpiry:approval.expiry}),
+              JSON.stringify({intentId,revisionId:revision.id,reviewDecisionId:approval.id,rulesDigest,rulesDigestVersion,revisionContentHash:revision.content_hash,paramsHash:paramsDigest,targetNetwork,approvalExpiry:approval.expiry}),
               time
             );
             const createdIntent=reconcileIntentState(db,intentId,time);

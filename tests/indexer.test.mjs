@@ -68,7 +68,7 @@ test('store migration v1/v2 -> v3 preserves existing data and creates indexing t
 
     const db = openStore(file);
     try {
-      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
       assert.equal(db.prepare('SELECT wallet FROM users').get().wallet, wallet);
       assert.equal(db.prepare('SELECT COUNT(*) AS n FROM activity').get().n, 1);
       for (const table of ['market_events', 'ingestion_checkpoints', 'ingestion_gaps']) {

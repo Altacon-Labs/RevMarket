@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {Keypair} from '@stellar/stellar-sdk';
 import {openStore} from '../backend/store.mjs';
 import {createApi} from '../backend/app.mjs';
+import {RULES_SCHEMA,encodeRulesV1} from '../shared/rules-digest.mjs';
 
 const origin='http://127.0.0.1:5173';
 async function fixture(t,{superAdminWallets=[],rateLimit=1000}={}){
@@ -46,7 +47,7 @@ async function currentRevision(f,id,cookie){
 test('schema v2 creates draft/review tables and v1 data survives migration',async t=>{
   const db=openStore(':memory:');
   t.after(()=>db.close());
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version,4);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version,5);
   // All new tables exist
   for(const table of ['drafts','draft_revisions','review_decisions','audit_events','reviewers','publication_intents']){
     assert.ok(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(table),`Table ${table} should exist`);
@@ -65,7 +66,7 @@ test('schema rejects future versions',()=>{
   // openStore(':memory:') always starts fresh, so test with a file
   // We test the version guard logic separately
   const db2=openStore(':memory:');
-  assert.equal(db2.prepare('PRAGMA user_version').get().user_version,4);
+  assert.equal(db2.prepare('PRAGMA user_version').get().user_version,5);
   db2.close();
 });
 
@@ -720,7 +721,33 @@ test('W23: approved revision produces an off-chain publication intent pinned to 
   assert.equal(intent.reviewerWallet,s.reviewer.publicKey());
   assert.equal(intent.targetNetwork,'testnet');
   assert.equal(intent.networkPassphrase,'Test SDF Network ; September 2015');
-  assert.equal(intent.rulesDigest,s.contentHash);
+  const expectedEncoded=encodeRulesV1({
+    schema:RULES_SCHEMA,
+    network:'testnet',
+    question:'Will BTC reach $100k by end of 2026?',
+    category:'crypto',
+    tradingClose:2000,
+    observationTime:2100,
+    resolutionDeadline:2500,
+    yesRule:'BTC spot > $100k',
+    noRule:'BTC spot <= $100k',
+    equalityRule:'NO wins on equality',
+    sources:['https://api.coinbase.com','https://api.kraken.com'],
+    fallbackRule:'Median of active sources',
+    unavailableDataRule:'Invalid after deadline',
+    collateral:'native',
+    feeBps:30,
+    resolver:s.reviewer.publicKey(),
+    policyVersion:'v1',
+    implementationVersion:'1',
+  });
+  assert.equal(intent.rulesDigest,expectedEncoded.digest);
+  assert.notEqual(intent.rulesDigest,s.contentHash);
+  assert.equal(intent.rulesDigestVersion,RULES_SCHEMA);
+  assert.equal(intent.revisionContentHash,s.contentHash);
+  assert.deepEqual(intent.canonicalRules,expectedEncoded.payload);
+  assert.equal(intent.canonicalRulesJson,expectedEncoded.json);
+  assert.equal(intent.requiresFreshApproval,false);
   assert.equal(intent.approvalExpiry,5000);
   assert.ok(/^[0-9a-f]{64}$/.test(intent.paramsHash));
 
@@ -825,7 +852,24 @@ test('W23: a different parameter set is rejected and requires a fresh approval o
   assert.equal(diffNested.status,409);
 
   // Edit the draft with new parameters -> invalidates previous intent and approval
-  const edited=await s.f.call(`/drafts/${s.draftId}`,{method:'PUT',cookie:s.cc,body:draftBody({question:'Updated BTC $120k target?',feeBps:50,expectedRevisionId:s.revisionId})});
+  const edited=await s.f.call(`/drafts/${s.draftId}`,{method:'PUT',cookie:s.cc,body:draftBody({
+    question:'Updated BTC $120k target?',
+    category:'crypto',
+    yesRule:'BTC spot > $100k',
+    noRule:'BTC spot <= $100k',
+    equalityRule:'NO wins on equality',
+    sources:['https://api.coinbase.com','https://api.kraken.com'],
+    fallbackRule:'Median of active sources',
+    unavailableDataRule:'Invalid after deadline',
+    collateral:'native',
+    feeBps:50,
+    resolver:s.reviewer.publicKey(),
+    policyVersion:'v1',
+    implementationVersion:'1',
+    observationTime:2100,
+    resolutionDeadline:2500,
+    expectedRevisionId:s.revisionId,
+  })});
   assert.equal(edited.status,200);
   assert.equal(edited.body.status,'draft');
 
@@ -966,4 +1010,136 @@ test('submit rejects identical YES/NO criteria, duplicate/empty sources, and inc
   const resExpired=await f.call(`/drafts/${expiredClose.body.id}/submit`,{method:'POST',cookie,body:{}});
   assert.equal(resExpired.status,400);
   assert.ok(resExpired.body.fields.tradingClose);
+});
+
+// --- Canonical revmarket.rules.v1 publication intent digest & legacy isolation tests ---
+test('canonical publication intent matches docs/RULES_DIGEST.md Vector 1 and changes on policyVersion, unavailableDataRule, and resolutionDeadline',async t=>{
+  const vectorBody={
+    question:'Will BTC/USD exceed 100,000 USD at the observation time?',
+    category:'crypto',
+    tradingClose:1800000000,
+    observationTime:1800000060,
+    resolutionDeadline:1800086400,
+    yesRule:'Spot median across listed sources is strictly greater than 100000.00 USD.',
+    noRule:'Spot median across listed sources is less than or equal to 100000.00 USD.',
+    equalityRule:'Exact equality at 100000.00 USD resolves to NO.',
+    sources:[
+      'https://api.coinbase.com/v2/prices/BTC-USD/spot',
+      'https://api.kraken.com/0/public/Ticker?pair=XBTUSD',
+      'https://www.bitstamp.net/api/v2/ticker/btcusd/',
+    ],
+    fallbackRule:'If one source is unavailable, resolve when two remaining sources agree within 2 percent.',
+    unavailableDataRule:'If fewer than two sources report within the window, market resolves Invalid.',
+    collateral:'native',
+    feeBps:30,
+    resolver:'GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H',
+    policyVersion:'v1.0.0',
+    implementationVersion:'v2.0.0-rc1',
+  };
+  const s=await setupApprovedDraft(t,{bodyOverrides:vectorBody});
+  const created=await s.f.call(`/drafts/${s.draftId}/publication-intents`,{method:'POST',cookie:s.cc,body:{}});
+  assert.equal(created.status,201);
+  const intent=created.body.intent;
+
+  const expectedVector=encodeRulesV1({schema:RULES_SCHEMA,network:'testnet',...vectorBody});
+  assert.equal(intent.rulesDigest,expectedVector.digest);
+  assert.equal(intent.rulesDigest,'37acf9ccdc64ff679b41b45cbc84261ff95157334078ec079ee02f7e829a4af3');
+  assert.equal(intent.rulesDigestVersion,RULES_SCHEMA);
+  assert.equal(intent.revisionContentHash,s.contentHash);
+  assert.notEqual(intent.rulesDigest,intent.revisionContentHash);
+  assert.equal(intent.canonicalRulesJson,expectedVector.json);
+  assert.equal(Buffer.byteLength(intent.canonicalRulesJson,'utf8'),expectedVector.bytes.length);
+  assert.equal(intent.requiresFreshApproval,false);
+
+  // Both creator and reviewer can inspect exact canonical rules committed by the intent
+  for(const cookie of [s.cc,s.cr]){
+    const inspected=await s.f.call(`/publication-intents/${intent.id}`,{cookie});
+    assert.equal(inspected.status,200);
+    assert.deepEqual(inspected.body.intent.canonicalRules,encodeRulesV1({schema:RULES_SCHEMA,network:'testnet',...vectorBody}).payload);
+    assert.equal(inspected.body.intent.canonicalRulesJson,intent.canonicalRulesJson);
+  }
+
+  // Changes to policyVersion, unavailableDataRule, and resolutionDeadline each change rulesDigest
+  // even when legacy revisionContentHash does not include those fields
+  for(const patch of [
+    {policyVersion:'v1.0.1'},
+    {unavailableDataRule:'If fewer than two sources report within the window, market resolves NO.'},
+    {resolutionDeadline:1800086401},
+  ]){
+    const s2=await setupApprovedDraft(t,{bodyOverrides:{...vectorBody,...patch}});
+    const r2=await s2.f.call(`/drafts/${s2.draftId}/publication-intents`,{method:'POST',cookie:s2.cc,body:{}});
+    assert.equal(r2.status,201);
+    assert.equal(r2.body.intent.revisionContentHash,intent.revisionContentHash);
+    assert.notEqual(r2.body.intent.rulesDigest,intent.rulesDigest,`Patch ${JSON.stringify(patch)} must change rulesDigest`);
+    assert.equal(r2.body.intent.rulesDigest,encodeRulesV1({schema:RULES_SCHEMA,network:'testnet',...vectorBody,...patch}).digest);
+  }
+});
+
+test('incomplete approved draft retains legacy contentHash and rejects canonical publication intent with requiresFreshApproval',async t=>{
+  const admin=Keypair.random(),creator=Keypair.random(),reviewer=Keypair.random();
+  const f=await fixture(t,{superAdminWallets:[admin.publicKey()]});
+  const ca=await f.login(admin),cc=await f.login(creator),cr=await f.login(reviewer);
+  await f.call('/admin/reviewers',{method:'POST',cookie:ca,body:{wallet:reviewer.publicKey(),action:'add'}});
+
+  // draftBody() passes submit validation but omits category, resolver, policyVersion, implementationVersion
+  const created=await f.call('/drafts',{method:'POST',cookie:cc,body:draftBody()});
+  const id=created.body.id;
+  await f.call(`/drafts/${id}/submit`,{method:'POST',cookie:cc,body:{}});
+  const review=await f.call(`/drafts/${id}/review`,{method:'POST',cookie:cr,body:{decision:'approved',expectedRevisionId:created.body.revisionId}});
+  assert.equal(review.status,200);
+
+  // Draft view retains original contentHash and never silently relabels as canonical
+  const view=await f.call(`/drafts/${id}`,{cookie:cc});
+  assert.equal(view.status,200);
+  const rev=view.body.revisions[0];
+  assert.equal(rev.contentHash,created.body.contentHash);
+  assert.equal(rev.canonicalRulesReady,false);
+  assert.equal(rev.rulesDigest,null);
+  assert.equal(rev.rulesDigestVersion,null);
+  assert.ok(typeof rev.canonicalRulesError==='string'&&rev.canonicalRulesError.length>0);
+
+  // Issuing a publication intent is rejected and requires fresh approval on a complete revision
+  const intentRes=await f.call(`/drafts/${id}/publication-intents`,{method:'POST',cookie:cc,body:{}});
+  assert.equal(intentRes.status,409);
+  assert.equal(intentRes.body.code,'incomplete_canonical_rules');
+  assert.equal(intentRes.body.requiresFreshApproval,true);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM publication_intents WHERE draft_id=?').get(id).n,0);
+});
+
+test('previously persisted legacy publication intent remains readable, is never silently relabeled, and requires fresh approval',async t=>{
+  const s=await setupApprovedDraft(t);
+  const approvalRow=s.f.db.prepare('SELECT id FROM review_decisions WHERE draft_id=? ORDER BY id DESC LIMIT 1').get(s.draftId);
+  const legacyParams=JSON.stringify({schema:'revmarket.publication-intent.v1',network:'testnet',question:'Will BTC reach $100k by end of 2026?'});
+
+  // Insert a pre-v5 legacy publication_intents row (default rules_digest_version='legacy.revision_content_hash', rules_json=NULL)
+  const inserted=s.f.db.prepare(`
+    INSERT INTO publication_intents(
+      draft_id,revision_id,review_decision_id,creator_wallet,reviewer_wallet,
+      target_network,network_passphrase,rules_digest,params_hash,params_json,
+      approval_expiry,status,created_at,updated_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)
+  `).run(
+    s.draftId,s.revisionId,approvalRow.id,s.creator.publicKey(),s.reviewer.publicKey(),
+    'testnet','Test SDF Network ; September 2015',s.contentHash,'a'.repeat(64),legacyParams,
+    5000,1000,1000
+  );
+  const legacyId=Number(inserted.lastInsertRowid);
+
+  // Creator and reviewer can still read the legacy intent; original hash is preserved and never relabeled
+  for(const cookie of [s.cc,s.cr]){
+    const getOne=await s.f.call(`/publication-intents/${legacyId}`,{cookie});
+    assert.equal(getOne.status,200);
+    assert.equal(getOne.body.intent.rulesDigest,s.contentHash);
+    assert.equal(getOne.body.intent.rulesDigestVersion,'legacy.revision_content_hash');
+    assert.equal(getOne.body.intent.revisionContentHash,s.contentHash);
+    assert.equal(getOne.body.intent.canonicalRules,null);
+    assert.equal(getOne.body.intent.canonicalRulesJson,null);
+    assert.equal(getOne.body.intent.requiresFreshApproval,true);
+  }
+
+  // Attempting to reuse/re-issue on the legacy pending intent refuses silent relabeling
+  const retry=await s.f.call(`/drafts/${s.draftId}/publication-intents`,{method:'POST',cookie:s.cc,body:{}});
+  assert.equal(retry.status,409);
+  assert.equal(retry.body.code,'legacy_publication_intent');
+  assert.equal(retry.body.requiresFreshApproval,true);
 });
