@@ -23,9 +23,12 @@ function AuthenticatedApp() {
 }
 
 function Root() {
-	const app = privyAppId
-		? <PrivyProvider appId={privyAppId} config={privyConfig}><BrowserRouter><AuthenticatedApp /></BrowserRouter></PrivyProvider>
-		: <BrowserRouter><App privyEnabled={false} /></BrowserRouter>;
+	const e2eMode = import.meta.env.VITE_E2E_TEST_MODE === 'true';
+	const app = e2eMode
+		? <BrowserRouter><App privyEnabled ready authenticated user={{email: {address: 'browser-fixture@revmarket.test'}}} onLogin={() => {}} onLogout={() => {}} /></BrowserRouter>
+		: privyAppId
+			? <PrivyProvider appId={privyAppId} config={privyConfig}><BrowserRouter><AuthenticatedApp /></BrowserRouter></PrivyProvider>
+			: <BrowserRouter><App privyEnabled={false} /></BrowserRouter>;
 	return <StrictMode>{app}</StrictMode>;
 }
 

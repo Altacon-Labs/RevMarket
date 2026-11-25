@@ -8,6 +8,7 @@
   "workspaces": ["frontend", "backend", "service"],
   "scripts": {
     "test": "node --experimental-sqlite --test tests/*.test.mjs",
+    "test:browser": "node scripts/browser-e2e.mjs",
     "backend": "node --experimental-sqlite backend/server.mjs",
     "ingest": "node --experimental-sqlite backend/ingest.mjs",
     "check:icons": "node scripts/check-icons.mjs",

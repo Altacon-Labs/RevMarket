@@ -24,8 +24,11 @@ import PublicationIntentPage from './components/PublicationIntentPage.jsx';
 const env = import.meta.env;
 const statuses = ['Open', 'Resolution requested', 'Settled', 'Refundable'];
 let client;
+const e2eAdapter = env.VITE_E2E_TEST_MODE === 'true' && typeof window !== 'undefined'
+  ? window.__REVMARKET_E2E__
+  : null;
 try {
-  client = createClient({rpcUrl: env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org', contractId: env.VITE_CONTRACT_ID});
+  client = e2eAdapter?.client || createClient({rpcUrl: env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org', contractId: env.VITE_CONTRACT_ID});
 } catch {
   client = null;
 }
