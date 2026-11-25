@@ -335,6 +335,7 @@ try {
   await page.getByRole('button', {name: 'Refresh'}).click();
   await page.getByRole('button', {name: 'Request'}).click();
   await page.evaluate(() => window.__REVMARKET_E2E__.resolve(1));
+  await page.getByRole('button', {name: 'Refresh'}).click();
 
   await navigate(page, '/event/will-browser-fixture-market-settle-yes#1');
   await page.locator('[data-testid="settlement-evidence"]').waitFor();
