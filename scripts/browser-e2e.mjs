@@ -74,7 +74,7 @@ async function switchWallet(page, address) {
     window.__REVMARKET_E2E__.wallet.address = next;
     window.__REVMARKET_E2E__.wallet.connected = false;
   }, address);
-  await page.getByRole('button', {name: 'Connect Freighter'}).click();
+  await page.getByRole('button', {name: 'Connect Freighter', exact: true}).click();
 }
 
 async function api(page, path, {method = 'GET', body} = {}) {
@@ -256,7 +256,7 @@ try {
 
   // Settings: connect a deterministic Testnet wallet, establish a session and manage a reviewer.
   await page.goto(`${origin}/settings`);
-  await page.getByRole('button', {name: 'Connect Freighter'}).click();
+  await page.getByRole('button', {name: 'Connect Freighter', exact: true}).click();
   await page.getByRole('button', {name: 'Verify super-admin access'}).click();
   await page.getByText('Super admin', {exact: true}).waitFor();
   await page.getByLabel('Reviewer Stellar G-address').fill(reviewer.publicKey());
