@@ -1,4 +1,4 @@
-import {useEffect, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 import {
   buildDraftReviewSummary,
@@ -171,6 +171,7 @@ export function DraftReviewSummary({status, revisionNumber, form, availability})
 export default function CreateMarketModal({
   busy,
   previewMode,
+  escrow = null,
   onClose,
   onCreate,
   fixtureMode: fixtureModeProp,
@@ -188,6 +189,8 @@ export default function CreateMarketModal({
   const [kind, setKind] = useState('event');
   const [error, setError] = useState('');
   const [category, setCategory] = useState(() => config.initialDraft?.category || 'Crypto');
+  const [uploadFailed, setUploadFailed] = useState(false);
+  const formRef = useRef(null);
   const [question, setQuestion] = useState(() => config.initialDraft?.question || '');
   const [closes, setCloses] = useState(() => initialForm.tradingClose || defaultCloseInput());
   const [draftForm, setDraftForm] = useState(() => ({
@@ -519,19 +522,10 @@ export default function CreateMarketModal({
   async function submit(event) {
     event.preventDefault();
     setError('');
+    setUploadFailed(false);
     const formEl = event.currentTarget;
     const data = new FormData(formEl);
     try {
-      const pinnedCollateral = pinCollateralForDraft(selectedCollateral, {
-        fixtureMode,
-        allowlist: collateralAllowlist,
-        catalog,
-      });
-      const verifiedIdentity = resolveCollateralIdentity(pinnedCollateral, {
-        fixtureMode,
-        allowlist: collateralAllowlist,
-        catalog,
-      });
       const selectedFile = data.get('imageFile');
       const imageFile = selectedFile instanceof File && selectedFile.size > 0 ? selectedFile : null;
       if (imageFile && imageFile.size > 5 * 1024 * 1024) throw new Error('Choose an image smaller than 5 MB.');
@@ -543,11 +537,10 @@ export default function CreateMarketModal({
         target: data.get('target'),
         closes: data.get('closes'),
         description: data.get('description') || '',
-        collateral: pinnedCollateral,
-        collateralIdentity: verifiedIdentity,
         imageFile,
       }, (err) => {
         setError(err.message || 'Creation transaction failed');
+        setUploadFailed(err.code === 'ARTWORK_UPLOAD');
       });
     } catch (submitError) {
       setError(submitError.message);
@@ -589,7 +582,7 @@ export default function CreateMarketModal({
           Editing proposal #{savedDraft.draftId} · revision #{savedDraft.revisionNumber} · status <strong>{savedDraft.status}</strong>
         </p>}
       </section>
-      <form className="dialog-form" onSubmit={submit}>
+      <form ref={formRef} className="dialog-form" onSubmit={submit}>
         <div className="form-row">
           <label>Market type
             <select value={kind} onChange={event => setKind(event.target.value)}>
@@ -612,7 +605,7 @@ export default function CreateMarketModal({
         <div>
           <label>
             <span>
-              Collateral asset (Stellar Testnet)
+              Proposal collateral (draft review only)
               {fixtureMode && <span className="field-optional">Testnet synthetic fixtures enabled</span>}
             </span>
             <select
@@ -685,7 +678,7 @@ export default function CreateMarketModal({
           <input name="closes" type="datetime-local" required value={closes} onChange={event => {setCloses(event.target.value); setFieldErrors(previous => ({...previous, tradingClose: undefined}));}} aria-invalid={Boolean(fieldErrors.tradingClose)} aria-describedby={fieldErrors.tradingClose ? 'tradingClose-error' : undefined} />
           <FieldError name="tradingClose" errors={fieldErrors} />
         </label>
-        <label>Market artwork <span className="field-optional">Optional · custom image or auto-generated</span><input name="imageFile" type="file" accept="image/jpeg,image/png,image/webp" /></label>
+        <label>Market artwork <span className="field-optional">{kind === 'event' ? 'Required for event markets' : 'Optional · price markets show the token mark'}</span><input name="imageFile" type="file" accept="image/jpeg,image/png,image/webp" required={kind === 'event'} /></label>
         <p className="form-note">Artwork uploads are pinned by the backend; an off-chain Freighter sign-in may be requested. Only the image CID is stored on-chain.</p>
         <label>Resolution details / Description <span className="field-optional">Optional</span>
           <textarea name="description" rows="3" value={draftForm.description || ''} onChange={event => updateDraftField('description', event.target.value)} placeholder="Explain the resolution source, criteria, and evidence rules..." style={{width: '100%', resize: 'vertical'}} />
@@ -743,7 +736,13 @@ export default function CreateMarketModal({
         />
         <p className="form-note">Price markets use the first post-close observation from three sources. Event markets resolve according to stated evidence providers.</p>
         {previewMode && <p className="form-note">Read-only market preview.</p>}
+        {!previewMode && <p className={escrow?.error ? 'form-error' : 'form-note'} aria-label="Market escrow">
+          {escrow?.error || (escrow
+            ? <>Stakes in this market are escrowed in <strong>{escrow.label}</strong> (contract {escrow.contractId}), set by the deployed market contract. The proposal collateral above is saved with drafts only.</>
+            : 'Reading the escrow asset from the market contract…')}
+        </p>}
         {error && <p className="form-error" role="alert">{error}</p>}
+        {uploadFailed && <button type="button" className="button button-secondary" disabled={busy} onClick={() => formRef.current.requestSubmit()}>Retry upload</button>}
         <div className="dialog-actions" style={{display: 'flex', flexWrap: 'wrap', gap: '8px'}}>
           <button type="button" className="button button-secondary" onClick={onClose}>Cancel</button>
           <button type="button" className="button button-secondary" disabled={draftBusy || busy || previewMode || !draftAvailability.canSave} onClick={persistDraft}>
@@ -758,7 +757,7 @@ export default function CreateMarketModal({
         </div>
         {!draftAvailability.canSubmit && draftAvailability.reason && <p className="form-note" role="status">{draftAvailability.reason}</p>}
         <p className="form-note">Reviewed submissions are saved off-chain first. &ldquo;Create on testnet&rdquo; remains the separate direct on-chain action.</p>
-        <div className="dialog-actions"><button className="button button-primary" disabled={busy || previewMode}>{previewMode ? 'Preview only' : busy ? 'Submitting…' : 'Create on testnet'}</button></div>
+        <div className="dialog-actions"><button className="button button-primary" disabled={busy || previewMode || !escrow?.label}>{previewMode ? 'Preview only' : busy ? 'Submitting…' : 'Create on testnet'}</button></div>
       </form>
     </section>
   </div>;
