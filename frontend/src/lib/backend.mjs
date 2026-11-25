@@ -655,6 +655,22 @@ export async function createDraft(draftData = {}, options = {}) {
   return await api('/drafts', {method: 'POST', body: {...draftData, collateral}});
 }
 
+export async function listDrafts({signal} = {}) {
+  const result = await api('/drafts', {signal});
+  if (!result || !Array.isArray(result.drafts)) {
+    throw new Error('Draft list returned an invalid response.');
+  }
+  return result.drafts;
+}
+
+export async function submitDraft(draftId) {
+  return await api(`/drafts/${draftId}/submit`, {method: 'POST', body: {}});
+}
+
+export async function withdrawDraft(draftId) {
+  return await api(`/drafts/${draftId}/withdraw`, {method: 'POST', body: {}});
+}
+
 export async function submitReview(draftId, {decision, reason, expectedRevisionId}) {
   return await api(`/drafts/${draftId}/review`, {method: 'POST', body: {decision, reason, expectedRevisionId}});
 }
