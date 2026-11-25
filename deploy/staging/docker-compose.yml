@@ -18,6 +18,12 @@ services:
       APP_ORIGIN: ${APP_ORIGIN:?APP_ORIGIN is required}
       BACKEND_DB: /var/lib/revmarket/db/revmarket.sqlite
       BACKEND_SHUTDOWN_TIMEOUT_MS: ${BACKEND_SHUTDOWN_TIMEOUT_MS:-5000}
+      # CONTRACT_ID and network are required so /api/activity/verified resolves the
+      # correct contract and reports indexer freshness; RESOLVER_SECRET is intentionally
+      # absent from this service.
+      CONTRACT_ID: ${CONTRACT_ID:?CONTRACT_ID is required}
+      STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      INDEXER_STALE_AFTER_SECONDS: ${INDEXER_STALE_AFTER_SECONDS:-120}
       SUPER_ADMIN_WALLETS: ${SUPER_ADMIN_WALLETS:-}
       PINATA_JWT: ${PINATA_JWT:-}
       AI_ENABLED: ${AI_ENABLED:-false}
@@ -65,6 +71,39 @@ services:
       retries: 3
       start_period: 5s
 
+  ingestor:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    # ingest.mjs performs a bounded sync (INGEST_MAX_PAGES) and exits, so wrap it in
+    # a sleep loop to make the indexer recurrent. Gap/unavailable statuses exit
+    # non-zero and are retried on the next pass; gaps and RPC outages are persisted
+    # to ingestion_gaps / the checkpoint status so they surface via the API.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          node --experimental-sqlite backend/ingest.mjs || true
+          sleep "$${INGEST_INTERVAL_SECONDS:-15}"
+        done
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    environment:
+      # Uses the same contract identity and network as the API; no signing key.
+      CONTRACT_ID: ${CONTRACT_ID:?CONTRACT_ID is required}
+      STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      BACKEND_DB: /var/lib/revmarket/db/revmarket.sqlite
+      START_LEDGER: ${START_LEDGER:-}
+      INGEST_PAGE_LIMIT: ${INGEST_PAGE_LIMIT:-100}
+      INGEST_MAX_PAGES: ${INGEST_MAX_PAGES:-25}
+      INGEST_INTERVAL_SECONDS: ${INGEST_INTERVAL_SECONDS:-15}
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ../../:/app:ro
+      - revmarket_staging_db:/var/lib/revmarket/db
+
   worker:
     image: node:22-bookworm-slim
     working_dir: /app
@@ -78,9 +117,15 @@ services:
       STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
       EVENT_SOURCE_URLS: ${EVENT_SOURCE_URLS:-[]}
       RUN_ONCE: ${RUN_ONCE:-0}
+      # Persist the attempts database on the dedicated state volume so that
+      # recreating the container does not lose retry history and evidence.
+      # The default path (./service/attempts.sqlite) falls under the read-only
+      # /app mount and would cause a write-permission error on startup.
+      ATTEMPTS_DB_PATH: /var/lib/revmarket/worker/attempts.sqlite
+      EVIDENCE_DIR: /var/lib/revmarket/evidence
     volumes:
       - ../../:/app:ro
-      - revmarket_staging_evidence:/app/service/evidence
+      - revmarket_staging_evidence:/var/lib/revmarket/evidence
       - revmarket_staging_worker_state:/var/lib/revmarket/worker
 
 volumes:
