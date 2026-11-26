@@ -4,7 +4,7 @@ import {createClient, normalizeMarket, sc} from '../../shared/stellar.mjs';
 import {formatAmount, parseAmount} from '../../shared/amount.mjs';
 import {connect, checkWallet, signer, getExistingAddress} from './lib/wallet.mjs';
 import PhosphorIcon from './icons/PhosphorIcon.jsx';
-import {logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import {getCurrentSession, logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
 import {createdMarketId, describeEscrow, prepareLegacyCreate, withLegacyArtwork} from './lib/legacy-create.mjs';
 import {MOCK_MARKETS} from './lib/mock-data.mjs';
 import Header from './components/Header.jsx';
@@ -16,6 +16,7 @@ import CreateMarketModal from './components/CreateMarketModal.jsx';
 import MarketDetailPage from './components/MarketDetailPage.jsx';
 import ProfilePage from './components/ProfilePage.jsx';
 import SettingsPage from './components/SettingsPage.jsx';
+import ReviewerQueuePage from './components/ReviewerQueuePage.jsx';
 import InfoPage from './components/InfoPage.jsx';
 import NotFoundPage from './components/NotFoundPage.jsx';
 import ActivityPage from './components/ActivityPage.jsx';
@@ -64,6 +65,15 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   currentSource.current = source;
   const [promptDismissed, setPromptDismissed] = useState(false);
   const autoConnectAttempted = useRef(false);
+  const [activitySession, setActivitySession] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    getCurrentSession()
+      .then(session => {if (active) setActivitySession(session);})
+      .catch(() => {if (active) setActivitySession(null);});
+    return () => {active = false;};
+  }, [address]);
 
   // Auto-connect Freighter for returning users or upon Privy authentication
   useEffect(() => {
@@ -254,8 +264,8 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     ...positionRows.filter(row => row.market.status === 0 && now >= Number(row.market.closes_at) && !row.timedOut).map(row => ({id: `request-${row.market.id}`, icon: 'info', title: 'Settlement can be requested', description: row.market.question, action: 'View positions', page: 'positions'})),
     ...positionRows.filter(row => row.market.status === 1).map(row => ({id: `pending-${row.market.id}`, icon: 'refresh', title: 'Settlement in progress', description: row.market.question, action: 'View positions', page: 'positions'})),
   ].slice(0, 8);
-  const activePage = location.pathname === '/markets/price' ? 'price' : location.pathname === '/markets/event' ? 'event' : location.pathname === '/positions' ? 'positions' : location.pathname === '/activity' ? 'activity' : location.pathname === '/settings' ? 'settings' : location.pathname === '/profile' ? 'profile' : 'markets';
-  const pagePaths = {markets: '/markets', price: '/markets/price', event: '/markets/event', positions: '/positions', activity: '/activity', settings: '/settings', profile: '/profile'};
+  const activePage = location.pathname === '/markets/price' ? 'price' : location.pathname === '/markets/event' ? 'event' : location.pathname === '/positions' ? 'positions' : location.pathname === '/activity' ? 'activity' : location.pathname === '/review-queue' ? 'reviewQueue' : location.pathname === '/settings' ? 'settings' : location.pathname === '/profile' ? 'profile' : 'markets';
+  const pagePaths = {markets: '/markets', price: '/markets/price', event: '/markets/event', positions: '/positions', activity: '/activity', reviewQueue: '/review-queue', settings: '/settings', profile: '/profile'};
   const navigate = page => routerNavigate(pagePaths[page] || '/markets');
   const requestResolution = marketId => runAction(() => send('request', [sc.u32(marketId)]));
   const claimPosition = marketId => runAction(() => send('claim', [sc.address(address), sc.u32(marketId)]));
@@ -279,7 +289,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   return <div className="app-shell">
     <Header address={address} busy={busy} previewMode={previewMode} search={search} onSearch={setSearch} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value => !value)} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onLogin={onLogin} onLogout={onLogout} authenticated={authenticated} authEnabled={privyEnabled && ready} onActivity={() => navigate('activity')} onCreate={() => setShowCreate(true)} notifications={notifications} onNavigate={navigate} />
     <div className={`workspace${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`}>
-      <Sidebar activePage={activePage} counts={counts} collapsed={sidebarCollapsed} address={address} onNavigate={navigate} />
+      <Sidebar activePage={activePage} counts={counts} collapsed={sidebarCollapsed} address={address} onNavigate={navigate} canReviewQueue={Boolean(activitySession?.canReviewQueue)} />
       <main className="main-content">
         {authenticated && !address && !promptDismissed && (
           <div className="wallet-prompt-banner" role="region" aria-label="Connect wallet notice">
@@ -309,6 +319,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/drafts/:draftId/publish" element={<PublicationIntentPage now={now} />} />
           <Route path="/drafts/:draftId/revisions/:revisionId/publish" element={<PublicationIntentPage now={now} />} />
           <Route path="/publication-intents/:intentId" element={<PublicationIntentPage now={now} />} />
+          <Route path="/review-queue" element={<ReviewerQueuePage />} />
           <Route path="/settings" element={<SettingsPage address={address} busy={busy} authenticated={authenticated} authEnabled={privyEnabled && ready} user={user} contractId={env.VITE_CONTRACT_ID} rpcUrl={env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org'} onLogin={onLogin} onLogout={onLogout} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} />} />
           <Route path="/how-to-use" element={<InfoPage page="how-to-use" />} />
           <Route path="/how-it-works" element={<InfoPage page="how-it-works" />} />
