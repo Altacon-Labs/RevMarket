@@ -118,6 +118,67 @@ docker compose -f deploy/staging/docker-compose.yml up -d
 - The `worker` container mounts `revmarket_staging_evidence` at `/app/service/evidence` and never receives `AI_API_KEY` or `PINATA_JWT`.
 - Restarting `api` (`docker compose -f deploy/staging/docker-compose.yml restart api`) delivers `SIGTERM`, drains in-flight requests, closes SQLite cleanly, and reopens `/var/lib/revmarket/db/revmarket.sqlite` with all committed rows intact.
 
+### Option C: One-origin built SPA and `/api` route (recommended for browser testing)
+
+The `web` service in `deploy/staging/docker-compose.yml` runs `nginx:1.27-alpine` with the repo-owned `deploy/staging/nginx.conf`. It serves the built React app, falls back to `index.html` for SPA deep links, and forwards `/api/` to `http://api:3001` on the compose network. The browser therefore talks to a single external origin, so origin checks and the `Path=/api` session cookie keep working without a cross-origin proxy.
+
+From a clean checkout:
+
+```sh
+npm ci
+npm run build            # writes frontend/dist, mounted read-only by the web service
+APP_ORIGIN=http://localhost:8080 \
+STAGING_HTTP_PORT=8080 \
+CONTRACT_ID=CACP6QFWWZ7BBMDXB5KHC6AAQKE3HBQ4MFFZNNAIJWYK7P6GXJAMLHIN \
+RESOLVER_SECRET=<SERVER_ONLY_TESTNET_RESOLVER_SECRET> \
+AI_ENABLED=false \
+docker compose -f deploy/staging/docker-compose.yml up -d
+```
+
+Open the **exact** external origin, `http://localhost:8080`. `APP_ORIGIN` must match it byte for byte: `localhost` and `127.0.0.1` are different origins, and the backend rejects POST requests whose `Origin` header does not match. The backend accepts plain HTTP only for loopback origins; put an HTTPS terminator in front of the `web` service for any other host and set `APP_ORIGIN` to that `https:` origin (session cookies then gain `Secure`).
+
+Repository-owned routing checks:
+
+```sh
+# Readiness is JSON through the external origin.
+curl -fsS http://localhost:8080/api/ready
+# {"status":"ready","service":"revmarket-api"}
+
+# Unknown API routes stay JSON (never the SPA HTML).
+curl -s -o /tmp/unknown.json -w '%{http_code}\n' http://localhost:8080/api/not-a-route
+# 404
+# {"error":"Endpoint not found"}
+
+# SPA deep links and settings refresh as the app, not as a 404.
+curl -fsS http://localhost:8080/settings | grep -q '<div id="root">'
+curl -fsS http://localhost:8080/event/example | grep -q '<div id="root">'
+```
+
+Then, in the browser at `http://localhost:8080`:
+
+1. Sign in with a fixture Testnet wallet. The `POST /api/auth/challenge` and `POST /api/auth/verify` requests are same-origin through `/api`.
+2. `GET /api/me` returns the signed-in wallet using the `revmarket_session` cookie.
+3. `POST /api/logout` clears the cookie (`Max-Age=0`).
+4. Repeating a POST with a mismatched `Origin` still returns `403 Origin not allowed`; the proxy must forward `Origin` unchanged (the committed `nginx.conf` does).
+
+`npm run staging:drill` remains the self-contained fixture version of this flow when Docker is not available.
+
+#### Public configuration versus server secrets
+
+Only `VITE_*` values are bundled into the browser build. They are public by definition; never put server secrets in a `VITE_` variable.
+
+| Need | Minimum configuration |
+|---|---|
+| Anonymous reads (market list, detail, charts) | `VITE_RPC_URL` (HTTPS), `VITE_CONTRACT_ID`, and `VITE_READ_ACCOUNT` (a funded Testnet account used only as the simulation source) |
+| Backend API on the same origin | `BACKEND_ENV=staging`, `APP_ORIGIN`, `BACKEND_DB`, `BACKEND_PORT` |
+| Signed writes (Freighter) | all of the above plus a connected browser wallet; the API holds no signing key |
+| Settlement worker | `CONTRACT_ID`, `RESOLVER_SECRET`, `STELLAR_RPC_URL`, `EVENT_SOURCE_URLS` in the worker process only |
+| Optional Privy login | `VITE_PRIVY_APP_ID` (public); configure the exact staging origin in the Privy dashboard |
+| Optional image upload | server-only `PINATA_JWT` |
+| Optional AI drafting | server-only `AI_ENABLED=true`, `AI_ENDPOINT`, `AI_API_KEY`, `AI_MODEL` |
+
+Privy, Pinata and AI are optional: without them the mock-up still performs anonymous reads and manual drafting, and `/api/market-image` or `/api/drafts/:id/ai-assist` return documented errors. No live hosting purchase is required; the compose recipe runs locally on `localhost`.
+
 ---
 
 ## 4. Graceful shutdown, backup, and rollback procedure

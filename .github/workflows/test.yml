@@ -7,32 +7,64 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  FOUNDRY_PROFILE: ci
-
 jobs:
-  check:
-    name: Foundry project
+  javascript:
+    name: JavaScript
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
-          submodules: recursive
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+      - name: Setup Node.js (>=22.12.0)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
 
-      - name: Show Forge version
-        run: forge --version
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Run Forge fmt
-        run: forge fmt --check
+      - name: Run JavaScript tests
+        run: npm test
 
-      - name: Run Forge build
-        run: forge build --sizes
+      - name: Check icons
+        run: npm run check:icons
 
-      - name: Run Forge tests
-        run: forge test -vvv
+      - name: Build frontend
+        run: npm run build
+
+      - name: Install pinned Playwright runner
+        run: npm install --no-save --no-package-lock playwright@1.56.1
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser fixture scenarios
+        run: npm run test:browser
+        env:
+          CI: "true"
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust target
+        run: |
+          rustup target add wasm32v1-none || (rustup update stable && rustup target add wasm32v1-none)
+
+      - name: Run Rust workspace tests
+        run: cargo test --locked --lib --manifest-path contracts/Cargo.toml
+
+      - name: Build contracts WASM
+        run: cargo build --locked --release --target wasm32v1-none --manifest-path contracts/Cargo.toml

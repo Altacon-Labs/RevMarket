@@ -37,7 +37,7 @@ export function createClient({rpcUrl, contractId, networkPassphrase = Networks.T
       if (BigInt(prepared.fee) > maxFee) throw new Error('Estimated transaction fee exceeds 1 XLM limit');
       const signed = await sign(prepared.toXDR(), networkPassphrase);
       const signedTx = TransactionBuilder.fromXDR(signed, networkPassphrase);
-      return {hash:signedTx.hash().toString('hex'), xdr:signed, sequence:account.sequenceNumber()};
+      return {hash:Array.from(signedTx.hash(), byte => byte.toString(16).padStart(2, '0')).join(''), xdr:signed, sequence:account.sequenceNumber()};
     },
     async submit(signedXdr) {
       const result = await server.sendTransaction(TransactionBuilder.fromXDR(signedXdr, networkPassphrase));
@@ -55,6 +55,11 @@ export function createClient({rpcUrl, contractId, networkPassphrase = Networks.T
         if (state.status === 'failed') throw new Error(`Transaction failed: ${hash}`);
       }
       throw new Error(`Confirmation timed out; check hash before retrying: ${hash}`);
+    },
+    async deploymentToken() {
+      const {val} = await server.getContractData(contractId, xdr.ScVal.scvLedgerKeyContractInstance(), rpc.Durability.Persistent);
+      const config = val.contractData.val.instance.storage.find(entry => scValToNative(entry.key)[0] === 'Config');
+      return scValToNative(config.val).token;
     },
     async read(source, method, args = []) {
       // Read-only simulation needs no wallet signature. RPC checks source existence.

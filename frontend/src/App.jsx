@@ -1,10 +1,11 @@
 import {useEffect, useRef, useState} from 'react';
 import {Navigate, Route, Routes, useLocation, useNavigate} from 'react-router-dom';
 import {createClient, normalizeMarket, sc} from '../../shared/stellar.mjs';
-import {formatAmount, parseAmount, priceUnits} from '../../shared/amount.mjs';
+import {formatAmount, parseAmount} from '../../shared/amount.mjs';
 import {connect, checkWallet, signer, getExistingAddress} from './lib/wallet.mjs';
 import PhosphorIcon from './icons/PhosphorIcon.jsx';
-import {clearActivitySession, logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import {clearActivitySession, getCurrentSession, logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import {createdMarketId, describeEscrow, prepareLegacyCreate, withLegacyArtwork} from './lib/legacy-create.mjs';
 import {MOCK_MARKETS} from './lib/mock-data.mjs';
 import Header from './components/Header.jsx';
 import Sidebar from './components/Sidebar.jsx';
@@ -15,15 +16,20 @@ import CreateMarketModal from './components/CreateMarketModal.jsx';
 import MarketDetailPage from './components/MarketDetailPage.jsx';
 import ProfilePage from './components/ProfilePage.jsx';
 import SettingsPage from './components/SettingsPage.jsx';
+import ReviewerQueuePage from './components/ReviewerQueuePage.jsx';
 import InfoPage from './components/InfoPage.jsx';
 import NotFoundPage from './components/NotFoundPage.jsx';
 import ActivityPage from './components/ActivityPage.jsx';
+import PublicationIntentPage from './components/PublicationIntentPage.jsx';
 
 const env = import.meta.env;
 const statuses = ['Open', 'Resolution requested', 'Settled', 'Refundable'];
 let client;
+const e2eAdapter = env.VITE_E2E_TEST_MODE === 'true' && typeof window !== 'undefined'
+  ? window.__REVMARKET_E2E__
+  : null;
 try {
-  client = createClient({rpcUrl: env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org', contractId: env.VITE_CONTRACT_ID});
+  client = e2eAdapter?.client || createClient({rpcUrl: env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org', contractId: env.VITE_CONTRACT_ID});
 } catch {
   client = null;
 }
@@ -43,6 +49,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const [message, setMessage] = useState('');
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+  const [escrow, setEscrow] = useState(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {return localStorage.getItem('revmarket.sidebar-collapsed') === 'true';} catch {return false;}
   });
@@ -60,6 +67,15 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   currentAddress.current = address;
   const [promptDismissed, setPromptDismissed] = useState(false);
   const autoConnectAttempted = useRef(false);
+  const [activitySession, setActivitySession] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    getCurrentSession()
+      .then(session => {if (active) setActivitySession(session);})
+      .catch(() => {if (active) setActivitySession(null);});
+    return () => {active = false;};
+  }, [address]);
 
   // Auto-connect Freighter for returning users or upon Privy authentication
   useEffect(() => {
@@ -149,6 +165,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     }
     setLastAction(result.hash);
     await refresh();
+    return result;
   }
 
   async function connectWallet() {
@@ -180,48 +197,41 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   }
 
   async function createMarket({kind, category, question, asset, target, closes, description, imageFile}) {
+    const prepared = prepareLegacyCreate({kind, category, question, asset, target, closes, description, hasArtwork: Boolean(imageFile)}, {now: Math.floor(Date.now() / 1000)});
     if (!address) throw new Error('Connect Freighter first');
-    const closesAt = Math.floor(new Date(closes).getTime() / 1000);
-    if (!Number.isSafeInteger(closesAt) || closesAt <= Math.floor(Date.now() / 1000)) throw new Error('Choose a future closing time');
-    
-    // Safely upload image if available, fallback gracefully
+
     let imageCid = '';
     if (imageFile) {
       try {
         imageCid = await uploadMarketImage(imageFile, address, () => currentAddress.current === address);
-      } catch (err) {
-        if (err.activitySession || err.code === 'SESSION_ESTABLISHED' || err.status === 401 || err.status === 403) throw err;
-        // If local IPFS backend is unconfigured, provide clean fallback CID so transaction doesn't stall
-        imageCid = 'bafkreifdummyartworkcid';
+      } catch (uploadError) {
+        throw Object.assign(new Error(`Artwork upload failed (${uploadError.message}). Nothing was signed and your details are kept.`), {code: 'ARTWORK_UPLOAD'});
       }
-    } else {
-      imageCid = 'bafkreifdummyartworkcid';
     }
+    const market = withLegacyArtwork(prepared, imageCid);
 
-    const priceAsset = kind === 'price' ? asset : null;
-    const threshold = priceAsset ? priceUnits(target) : 0n;
-    const baseQuestion = priceAsset
-      ? `Will ${priceAsset} be strictly above $${target} USD at the first post-close observation (within 90 seconds)?`
-      : question;
-
-    // Embed chosen category seamlessly into the question metadata prefix: [Sports], [Crypto], [Food & Dining], etc.
-    const taggedQuestion = category && category !== 'General'
-      ? `[${category}] ${baseQuestion}`
-      : baseQuestion;
-
-    // Use description or fallback placeholder
-    const descriptionCid = description ? `desc:${encodeURIComponent(description.slice(0, 100))}` : '';
-
-    await send('create', [
+    const result = await send('create', [
       sc.address(address),
-      sc.text(taggedQuestion),
-      sc.text(descriptionCid),
-      sc.text(imageCid),
-      sc.kind(priceAsset, threshold),
-      sc.u64(closesAt)
+      sc.text(market.question),
+      sc.text(market.descriptionCid),
+      sc.text(market.imageCid),
+      sc.kind(market.priceAsset, market.threshold),
+      sc.u64(market.closesAt)
     ]);
     setShowCreate(false);
+    setMessage(`Market #${createdMarketId(result)} created. Transaction ${result.hash}`);
   }
+
+  useEffect(() => {
+    if (!showCreate || !client) return;
+    let stopped = false;
+    setEscrow(null);
+    client.deploymentToken().then(
+      token => {if (!stopped) setEscrow(describeEscrow(token));},
+      () => {if (!stopped) setEscrow({error: 'Could not read the collateral this market contract escrows. Close and reopen to retry.'});},
+    );
+    return () => {stopped = true;};
+  }, [showCreate]);
 
   useEffect(() => {
     let stopped = false;
@@ -271,8 +281,8 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     ...positionRows.filter(row => row.market.status === 0 && now >= Number(row.market.closes_at) && !row.timedOut).map(row => ({id: `request-${row.market.id}`, icon: 'info', title: 'Settlement can be requested', description: row.market.question, action: 'View positions', page: 'positions'})),
     ...positionRows.filter(row => row.market.status === 1).map(row => ({id: `pending-${row.market.id}`, icon: 'refresh', title: 'Settlement in progress', description: row.market.question, action: 'View positions', page: 'positions'})),
   ].slice(0, 8);
-  const activePage = location.pathname === '/markets/price' ? 'price' : location.pathname === '/markets/event' ? 'event' : location.pathname === '/positions' ? 'positions' : location.pathname === '/activity' ? 'activity' : location.pathname === '/settings' ? 'settings' : location.pathname === '/profile' ? 'profile' : 'markets';
-  const pagePaths = {markets: '/markets', price: '/markets/price', event: '/markets/event', positions: '/positions', activity: '/activity', settings: '/settings', profile: '/profile'};
+  const activePage = location.pathname === '/markets/price' ? 'price' : location.pathname === '/markets/event' ? 'event' : location.pathname === '/positions' ? 'positions' : location.pathname === '/activity' ? 'activity' : location.pathname === '/review-queue' ? 'reviewQueue' : location.pathname === '/settings' ? 'settings' : location.pathname === '/profile' ? 'profile' : 'markets';
+  const pagePaths = {markets: '/markets', price: '/markets/price', event: '/markets/event', positions: '/positions', activity: '/activity', reviewQueue: '/review-queue', settings: '/settings', profile: '/profile'};
   const navigate = page => routerNavigate(pagePaths[page] || '/markets');
   const requestResolution = marketId => runAction(() => send('request', [sc.u32(marketId)]));
   const claimPosition = marketId => runAction(() => send('claim', [sc.address(address), sc.u32(marketId)]));
@@ -296,7 +306,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   return <div className="app-shell">
     <Header address={address} busy={busy} previewMode={previewMode} search={search} onSearch={setSearch} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value => !value)} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onLogin={onLogin} onLogout={logoutApp} authenticated={authenticated} authEnabled={privyEnabled && ready} onActivity={() => navigate('activity')} onCreate={() => setShowCreate(true)} notifications={notifications} onNavigate={navigate} />
     <div className={`workspace${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`}>
-      <Sidebar activePage={activePage} counts={counts} collapsed={sidebarCollapsed} address={address} onNavigate={navigate} />
+      <Sidebar activePage={activePage} counts={counts} collapsed={sidebarCollapsed} address={address} onNavigate={navigate} canReviewQueue={Boolean(activitySession?.canReviewQueue)} />
       <main className="main-content">
         {authenticated && !address && !promptDismissed && (
           <div className="wallet-prompt-banner" role="region" aria-label="Connect wallet notice">
@@ -319,10 +329,14 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/markets" element={<><div className="page-heading"><div><p className="eyebrow">PREDICTION MARKETS</p><h1>Prediction markets</h1></div></div><MarketGrid {...marketProps} showLiveRow /></>} />
           <Route path="/markets/price" element={<><div className="page-heading"><div><p className="eyebrow">PRICE MARKETS</p><h1>Price markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Price')} /></>} />
           <Route path="/markets/event" element={<><div className="page-heading"><div><p className="eyebrow">EVENT MARKETS</p><h1>Event markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Event')} /></>} />
-          <Route path="/event/:slug" element={<MarketDetailPage markets={markets} positions={positions} address={address} source={source} client={client} loading={loading} authenticated={authenticated} onConnect={() => runAction(connectWallet)} onLogin={onLogin} busy={busy} now={now} previewMode={previewMode} onPredict={predict} onClaim={claimPosition} onRequest={requestResolution} />} />
+          <Route path="/event/:slug" element={<MarketDetailPage markets={markets} positions={positions} address={address} source={source} client={client} contractId={env.VITE_CONTRACT_ID} loading={loading} authenticated={authenticated} onConnect={() => runAction(connectWallet)} onLogin={onLogin} busy={busy} now={now} previewMode={previewMode} onPredict={predict} onClaim={claimPosition} onRequest={requestResolution} />} />
           <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} positions loaded from the contract</p></div></div><PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
           <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={logoutApp} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} />} />
           <Route path="/activity" element={<ActivityPage address={address} lastAction={lastAction} authenticated={authenticated} authEnabled={privyEnabled && ready} onLogin={onLogin} onConnect={() => runAction(connectWallet)} />} />
+          <Route path="/drafts/:draftId/publish" element={<PublicationIntentPage now={now} />} />
+          <Route path="/drafts/:draftId/revisions/:revisionId/publish" element={<PublicationIntentPage now={now} />} />
+          <Route path="/publication-intents/:intentId" element={<PublicationIntentPage now={now} />} />
+          <Route path="/review-queue" element={<ReviewerQueuePage />} />
           <Route path="/settings" element={<SettingsPage address={address} busy={busy} authenticated={authenticated} authEnabled={privyEnabled && ready} user={user} contractId={env.VITE_CONTRACT_ID} rpcUrl={env.VITE_RPC_URL || 'https://soroban-testnet.stellar.org'} onLogin={onLogin} onLogout={logoutApp} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} />} />
           <Route path="/how-to-use" element={<InfoPage page="how-to-use" />} />
           <Route path="/how-it-works" element={<InfoPage page="how-it-works" />} />
@@ -335,6 +349,6 @@ export default function App({privyEnabled = false, ready = false, authenticated 
         <footer className="app-footer"><span>RevMarket</span></footer>
       </main>
     </div>
-    {showCreate && <CreateMarketModal address={address} isWalletCurrent={() => currentAddress.current === address} busy={busy} previewMode={previewMode} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}
+    {showCreate && <CreateMarketModal address={address} isWalletCurrent={() => currentAddress.current === address} busy={busy} previewMode={previewMode} escrow={escrow} onClose={() => setShowCreate(false)} onCreate={(data, onError) => runAction(() => createMarket(data), onError)} />}
   </div>;
 }

@@ -1,8 +1,17 @@
 import {requestAccess, getAddress, getNetworkDetails, signTransaction, isConnected, isAllowed} from '@stellar/freighter-api';
 import {Networks} from '../../../shared/stellar.mjs';
 
+function e2eWallet() {
+  return import.meta.env?.VITE_E2E_TEST_MODE === 'true' && typeof window !== 'undefined'
+    ? window.__REVMARKET_E2E__?.wallet || null
+    : null;
+}
+
 export async function checkWallet(expectedAddress) {
-  const [account, network] = await Promise.all([getAddress(), getNetworkDetails()]);
+  const fixture = e2eWallet();
+  const [account, network] = fixture
+    ? await Promise.all([fixture.getAddress(), fixture.getNetworkDetails()])
+    : await Promise.all([getAddress(), getNetworkDetails()]);
   if (account.error || !account.address || account.address !== expectedAddress) {
     throw new Error('Wallet account changed. Reconnect before continuing.');
   }
@@ -12,7 +21,8 @@ export async function checkWallet(expectedAddress) {
 }
 
 export async function connect() {
-  const result = await requestAccess();
+  const fixture = e2eWallet();
+  const result = fixture ? await fixture.requestAccess() : await requestAccess();
   if (result.error || !result.address) throw new Error('Freighter connection was declined or the extension is unavailable');
   await checkWallet(result.address);
   return result.address;
@@ -20,6 +30,15 @@ export async function connect() {
 
 export async function getExistingAddress() {
   try {
+    const fixture = e2eWallet();
+    if (fixture) {
+      const installed = await fixture.isConnected();
+      if (!installed) return null;
+      const allowed = await fixture.isAllowed();
+      if (!allowed) return null;
+      const account = await fixture.getAddress();
+      return account?.address || null;
+    }
     const installed = await isConnected();
     if (!installed || installed.error) return null;
     const allowed = await isAllowed();
@@ -35,7 +54,10 @@ export async function getExistingAddress() {
 export function signer(address) {
   return async (xdr, networkPassphrase) => {
     await checkWallet(address);
-    const result = await signTransaction(xdr, {networkPassphrase, address});
+    const fixture = e2eWallet();
+    const result = fixture
+      ? await fixture.signTransaction(xdr, {networkPassphrase, address})
+      : await signTransaction(xdr, {networkPassphrase, address});
     if (result.error || !result.signedTxXdr) throw new Error('Transaction signature declined');
     if (result.signerAddress && result.signerAddress !== address) throw new Error('Wallet signer changed');
     return result.signedTxXdr;

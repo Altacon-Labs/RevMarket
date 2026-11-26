@@ -573,11 +573,14 @@ export async function signInActivity(address, isCurrent = () => true) {
   const assertCurrent = () => {
     if (!isCurrent()) throw new Error('Wallet selection changed; sign in again.');
   };
-  const [freighter, {checkWallet}] = await Promise.all([
-    import('@stellar/freighter-api'),
+  const [{checkWallet}, freighter] = await Promise.all([
     import('./wallet.mjs'),
+    import('@stellar/freighter-api'),
   ]);
-  const signMessage = freighter.signMessage || freighter.default?.signMessage;
+  const fixtureWallet = import.meta.env?.VITE_E2E_TEST_MODE === 'true'
+    ? window.__REVMARKET_E2E__?.wallet
+    : null;
+  const signMessage = fixtureWallet?.signMessage || freighter.signMessage || freighter.default?.signMessage;
   await checkWallet(address);
   assertCurrent();
   const challenge = await api('/auth/challenge', {method: 'POST', body: {wallet: address}});
@@ -752,8 +755,39 @@ export async function createDraft(draftData = {}, options = {}) {
   return await api('/drafts', {method: 'POST', body: {...draftData, collateral}});
 }
 
-export async function submitReview(draftId, {decision, reason, expectedRevisionId}) {
-  return await api(`/drafts/${draftId}/review`, {method: 'POST', body: {decision, reason, expectedRevisionId}});
+export async function listDrafts({signal} = {}) {
+  const result = await api('/drafts', {signal});
+  if (!result || !Array.isArray(result.drafts)) {
+    throw new Error('Draft list returned an invalid response.');
+  }
+  return result.drafts;
+}
+
+/** Alias used by the reviewer queue; same payload as listDrafts. */
+export async function getOwnedDrafts({signal} = {}) {
+  return listDrafts({signal});
+}
+
+export async function submitDraft(draftId) {
+  return await api(`/drafts/${draftId}/submit`, {method: 'POST', body: {}});
+}
+
+export async function withdrawDraft(draftId) {
+  return await api(`/drafts/${draftId}/withdraw`, {method: 'POST', body: {}});
+}
+
+export async function getReviewQueue({signal} = {}) {
+  const result = await api('/review-queue', {signal});
+  if (!result || !Array.isArray(result.queue)) {
+    throw new Error('Review queue returned an invalid response.');
+  }
+  return result.queue;
+}
+
+export async function submitReview(draftId, {decision, reason, expiry, expectedRevisionId}) {
+  const body = {decision, reason, expectedRevisionId};
+  if (expiry !== undefined) body.expiry = expiry;
+  return await api(`/drafts/${draftId}/review`, {method: 'POST', body});
 }
 
 // expectedRevisionId is the revision this edit is based on; a stale id is rejected with 409 revision_conflict.
@@ -772,7 +806,69 @@ export async function createPublicationIntent(draftId, options = {}) {
   return await api(`/drafts/${draftId}/publication-intents`, {method: 'POST', body: options});
 }
 
+export async function listPublicationIntents(draftId) {
+  return await api(`/drafts/${draftId}/publication-intents`);
+}
+
 export async function getPublicationIntent(intentId) {
   return await api(`/publication-intents/${intentId}`);
 }
 
+export function validateReviewerWallet(input) {
+  const wallet = typeof input === 'string' ? input.trim() : '';
+  if (!wallet) {
+    return {valid: false, wallet: '', error: 'Enter a Stellar G-address to add as a reviewer.'};
+  }
+  if (StrKey.isValidEd25519SecretSeed(wallet)) {
+    return {valid: false, wallet, error: 'Do not enter a secret key (S-address). Enter a public Stellar G-address.'};
+  }
+  if (!StrKey.isValidEd25519PublicKey(wallet)) {
+    return {valid: false, wallet, error: 'Enter a valid Stellar G-address (56-character Ed25519 public key starting with G).'};
+  }
+  return {valid: true, wallet, error: ''};
+}
+
+export async function getCurrentSession({signal} = {}) {
+  return await api('/me', {signal});
+}
+
+export async function getAdminNetwork({signal} = {}) {
+  return await api('/admin/network', {signal});
+}
+
+export async function listAdminReviewers({signal} = {}) {
+  const result = await api('/admin/reviewers', {signal});
+  if (!result || !Array.isArray(result.reviewers)) {
+    throw new Error('Reviewer directory returned an invalid response.');
+  }
+  return result.reviewers;
+}
+
+async function mutateAdminReviewer(wallet, action, {signal} = {}) {
+  const validation = validateReviewerWallet(wallet);
+  if (!validation.valid) {
+    const error = new Error(validation.error);
+    error.code = 'INVALID_REVIEWER_WALLET';
+    throw error;
+  }
+  if (action !== 'add' && action !== 'revoke') {
+    throw new Error('Reviewer action must be add or revoke.');
+  }
+  const result = await api('/admin/reviewers', {
+    method: 'POST',
+    body: {wallet: validation.wallet, action},
+    signal,
+  });
+  if (!result || result.updated !== true) {
+    throw new Error('Reviewer update returned an unexpected response.');
+  }
+  return result;
+}
+
+export async function addAdminReviewer(wallet, options = {}) {
+  return await mutateAdminReviewer(wallet, 'add', options);
+}
+
+export async function revokeAdminReviewer(wallet, options = {}) {
+  return await mutateAdminReviewer(wallet, 'revoke', options);
+}
