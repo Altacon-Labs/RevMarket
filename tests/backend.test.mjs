@@ -48,7 +48,7 @@ test('SEP-53 sign-in creates only a public-key profile and hashed HttpOnly sessi
   assert.ok(c.message.includes('Origin: '+origin));assert.ok(c.message.includes('No transaction or automation authority'));
   const result=await f.call('/auth/verify',{method:'POST',body:{id:c.id,signature:Buffer.from(key.signMessage(c.message)).toString('base64')}});
   assert.equal(result.status,200);assert.match(result.cookieHeader,/HttpOnly/);assert.match(result.cookieHeader,/SameSite=Strict/);
-  const me=await f.call('/me',{cookie:result.cookie});assert.equal(me.body.wallet,key.publicKey());assert.equal(me.body.automationEnabled,false);
+  const me=await f.call('/me',{cookie:result.cookie});assert.equal(me.body.wallet,key.publicKey());assert.equal(me.body.expiresAt,4600);assert.equal(me.body.automationEnabled,false);
   const stored=f.db.prepare('SELECT token_hash FROM sessions').get().token_hash;
   assert.notEqual(stored,result.cookie.split('=')[1]);
 });

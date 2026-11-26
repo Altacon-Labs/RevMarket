@@ -1,6 +1,6 @@
-import {useEffect, useRef, useState} from 'react';
+import {useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {Link} from 'react-router-dom';
-import {formatShortAddress, validateReviewerWallet} from '../lib/backend.mjs';
+import {ensureActivitySession, formatShortAddress, validateReviewerWallet} from '../lib/backend.mjs';
 import {
   REVOCATION_EFFECTS,
   createAdminSettingsController,
@@ -12,6 +12,16 @@ import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 
 const shortAddress = address => formatShortAddress(address, 8, 6);
 
+function sessionError(error) {
+  if (error.status === 401 || /signature|challenge expired/i.test(error.message)) {
+    return {status: 'needs-signature', message: error.message || 'The backend session expired. Sign in again.'};
+  }
+  if (error.code === 'API_UNREACHABLE' || error.code === 'INVALID_API_RESPONSE' || error.name === 'TimeoutError') {
+    return {status: 'unavailable', message: 'The activity service could not be reached. Try again when it is available.'};
+  }
+  return {status: 'error', message: error.message || 'Backend session check failed.'};
+}
+
 export default function SettingsPage({address, busy, authenticated, authEnabled, user, contractId, rpcUrl, onLogin, onLogout, onConnect, onDisconnect}) {
   const controllerRef = useRef(null);
   if (!controllerRef.current) {
@@ -20,8 +30,35 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
   const [adminState, setAdminState] = useState(() => controllerRef.current.getState());
   const [walletInput, setWalletInput] = useState('');
   const [inputError, setInputError] = useState('');
+  const [sessionState, setSessionState] = useState({status: 'unchecked', message: ''});
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const operation = useRef(0);
+  const activeAddress = useRef(address);
+  activeAddress.current = address;
   const email = user?.email?.address;
   const rpcHost = (() => {try {return new URL(rpcUrl).host;} catch {return 'Configured RPC';}})();
+
+  useLayoutEffect(() => {
+    operation.current++;
+    setSessionState({status: address ? 'unchecked' : 'disconnected', message: ''});
+  }, [address]);
+
+  useEffect(() => {
+    const clearProtectedState = event => {
+      operation.current++;
+      const expired = event.detail?.reason !== 'logout';
+      setSessionState({
+        status: address ? (expired ? 'needs-signature' : 'unchecked') : 'disconnected',
+        message: address ? `The signed backend session ${expired ? 'expired' : 'was signed out'}. Check or sign in again.` : '',
+      });
+      controllerRef.current.abortInFlight();
+      controllerRef.current.setAddress('');
+      controllerRef.current.setAddress(address);
+      setAdminState(controllerRef.current.getState());
+    };
+    window.addEventListener('revmarket:activity-session-invalidated', clearProtectedState);
+    return () => window.removeEventListener('revmarket:activity-session-invalidated', clearProtectedState);
+  }, [address]);
 
   useEffect(() => {
     const controller = controllerRef.current;
@@ -38,24 +75,20 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
     controller.setAddress(address);
     setWalletInput('');
     setInputError('');
-    if (address) {
-      controller.restoreSession();
-    }
-    return () => {
-      controller.abortInFlight();
-    };
+    if (address) controller.restoreSession();
+    return () => controller.abortInFlight();
   }, [address]);
+
+  function isCurrent(wallet, version) {
+    return activeAddress.current === wallet && operation.current === version;
+  }
 
   const isAuthorized = isAdminAuthorizedForWallet(adminState, address);
   const isMutating = Boolean(adminState.mutatingAction);
   const {active: activeReviewers, revoked: revokedReviewers} = partitionReviewers(adminState.reviewers);
   const orderedReviewers = [...activeReviewers, ...revokedReviewers];
   const trimmedInput = walletInput.trim();
-  const matchingRevokedInput = Boolean(
-    trimmedInput &&
-    revokedReviewers.some(item => item.wallet === trimmedInput),
-  );
-
+  const matchingRevokedInput = Boolean(trimmedInput && revokedReviewers.some(item => item.wallet === trimmedInput));
   const adminStatusLabel = isAuthorized
     ? 'Super admin'
     : adminState.status === 'denied'
@@ -65,9 +98,34 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
         : 'Not verified';
   const adminMessageIsAlert = adminState.status === 'error' || adminState.status === 'expired';
 
+  async function checkBackendSession() {
+    if (!address || sessionBusy) return;
+    const wallet = address;
+    const version = ++operation.current;
+    setSessionBusy(true);
+    setSessionState({status: 'checking', message: ''});
+    try {
+      const {established} = await ensureActivitySession(wallet, {isCurrent: () => isCurrent(wallet, version)});
+      if (!isCurrent(wallet, version)) return;
+      setSessionState({
+        status: 'signed-in',
+        message: established ? 'Signed backend session established for this Freighter wallet.' : 'A valid signed backend session already matches this Freighter wallet.',
+      });
+    } catch (error) {
+      if (isCurrent(wallet, version)) setSessionState(sessionError(error));
+    } finally {
+      if (isCurrent(wallet, version)) setSessionBusy(false);
+    }
+  }
+
   async function handleVerifySuperAdmin() {
     if (!address || adminState.verifying) return;
-    await controllerRef.current.verifySuperAdmin();
+    const result = await controllerRef.current.verifySuperAdmin();
+    if (result?.ok) {
+      setSessionState({status: 'signed-in', message: 'A valid signed backend session matches this Freighter wallet.'});
+    } else if (result?.error) {
+      setSessionState(sessionError(result.error));
+    }
   }
 
   async function handleRefreshReviewers() {
@@ -83,10 +141,7 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
     }
     setInputError('');
     const result = await controllerRef.current.addReviewer(validation.wallet);
-    if (result?.ok) {
-      setWalletInput('');
-      setInputError('');
-    }
+    if (result?.ok) setWalletInput('');
   }
 
   async function handleReAddReviewer(wallet) {
@@ -106,6 +161,15 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
     await controllerRef.current.confirmRevoke();
   }
 
+  const sessionLabels = {
+    unchecked: 'Not checked',
+    disconnected: 'Wallet not connected',
+    checking: 'Checking…',
+    'signed-in': 'Signed backend session',
+    'needs-signature': 'Sign-in needed',
+    unavailable: 'Service unavailable',
+    error: 'Check failed',
+  };
   return <div className="settings-page">
     <div className="page-heading"><div><p className="eyebrow">PREFERENCES & SECURITY</p><h1>Settings</h1></div></div>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">ACCOUNT</p><h2>RevMarket sign-in</h2><p>Privy keeps your app account separate from Stellar transaction approvals.</p></div><span className={`settings-state${authenticated ? ' is-active' : ''}`}>{authenticated ? 'Signed in' : 'Not signed in'}</span></div><div className="settings-detail-row"><span>Email</span><strong>{email || 'No email linked'}</strong></div><div className="settings-detail-row"><span>Authentication</span><strong>{authEnabled ? 'Privy email and web3 wallet' : 'Unavailable'}</strong></div>{authenticated ? <button className="button button-secondary" onClick={() => onLogout?.()}>Sign out</button> : <button className="button button-secondary" disabled={!authEnabled} onClick={() => onLogin?.()}>Sign in</button>}</section>
@@ -113,26 +177,15 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
     <section className="settings-section">
       <div className="settings-section-heading">
         <div>
-          <p className="eyebrow">ACTIVITY PROFILE</p>
-          <h2>Off-chain activity session</h2>
-          <p>{PROFILE_LIFECYCLE_COPY.signatureNotice}</p>
+          <p className="eyebrow">BACKEND SESSION</p>
+          <h2>Wallet-scoped session</h2>
+          <p>A signed Freighter message establishes an off-chain session for the connected address. It is not a transaction approval.</p>
         </div>
-        <span className={`settings-state${profileState.profile ? ' is-active' : ''}`}>{profileBadge}</span>
+        <span className={`settings-state${sessionState.status === 'signed-in' ? ' is-active' : ''}`}>{sessionLabels[sessionState.status]}</span>
       </div>
-      <div className="settings-detail-row"><span>Backend service</span><strong>{profileState.status === 'checking' ? 'Checking…' : profileState.status === 'online' ? 'Online' : 'Offline'}</strong></div>
-      <div className="settings-detail-row"><span>Profile wallet</span><strong>{profileState.profile ? shortAddress(profileState.profile.wallet) : 'No active off-chain session'}</strong></div>
-      <div className="settings-detail-row"><span>Private reports</span><strong>{profileState.profile ? `${profileState.items.length} reported ${profileState.items.length === 1 ? 'action' : 'actions'}` : 'None'}</strong></div>
-      <p className="form-note">{PROFILE_LIFECYCLE_COPY.deletionScopeSummary}</p>
-      {profileState.message && <p className="form-error" role="alert">{profileState.message}</p>}
-      <div className="activity-actions">
-        {profileState.status === 'offline' && <button className="button button-secondary" type="button" disabled={profileBusy} onClick={refreshProfile}>Retry</button>}
-        {profileState.status === 'online' && address && !profileState.profile && <button className="button button-secondary" type="button" disabled={profileBusy} onClick={enableProfile}>Enable activity profile</button>}
-        {profileState.status === 'online' && profileState.profile && <>
-          <button className="button button-secondary" type="button" disabled={profileBusy} onClick={refreshProfile}>Refresh</button>
-          <button className="button button-quiet button-small" type="button" disabled={profileBusy} onClick={signOutProfile}>Sign out of activity</button>
-          <button className="button button-quiet button-small" type="button" disabled={profileBusy} onClick={deleteProfile}>Delete off-chain profile</button>
-        </>}
-      </div>
+      <div className="settings-detail-row"><span>Session wallet</span><strong>{address ? shortAddress(address) : 'Connect a Freighter wallet first'}</strong></div>
+      <button className="button button-secondary" disabled={!address || sessionBusy} onClick={checkBackendSession}>{sessionBusy ? 'Checking session…' : sessionState.status === 'signed-in' ? 'Check backend session' : 'Check or sign in'}</button>
+      {sessionState.message && <p className={sessionState.status === 'error' || sessionState.status === 'unavailable' ? 'form-error' : 'form-note'} role={sessionState.status === 'error' || sessionState.status === 'unavailable' ? 'alert' : 'status'}>{sessionState.message}</p>}
     </section>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">NETWORK</p><h2>Stellar Testnet</h2><p>Market creation and positions use the configured Soroban contract.</p></div><span className="settings-state is-active">Testnet</span></div><div className="settings-detail-row"><span>RPC host</span><strong>{rpcHost}</strong></div><div className="settings-detail-row"><span>Contract</span><strong>{contractId || 'Not configured'}</strong></div><div className="settings-detail-row"><span>Market status</span><strong>{contractId ? 'Reading from contract' : 'Read-only: no contract configured'}</strong></div></section>
     <section className="settings-section">

@@ -1,8 +1,9 @@
-import {useEffect, useRef, useState} from 'react';
+import {useEffect, useLayoutEffect, useRef, useState} from 'react';
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 import {
   buildDraftReviewSummary,
   createDraft,
+  ensureActivitySession,
   getDraft,
   isAiAssistResultStale,
   listDrafts,
@@ -171,6 +172,8 @@ export function DraftReviewSummary({status, revisionNumber, form, availability})
 export default function CreateMarketModal({
   busy,
   previewMode,
+  address,
+  isWalletCurrent = () => true,
   escrow = null,
   onClose,
   onCreate,
@@ -216,6 +219,36 @@ export default function CreateMarketModal({
       }
     : null);
   const [revisionConflict, setRevisionConflict] = useState(null);
+  const activeWallet = useRef(address);
+  const operation = useRef(0);
+
+  useLayoutEffect(() => {
+    if (activeWallet.current === address) return;
+    activeWallet.current = address;
+    operation.current++;
+    setAiLoading(false);
+    setSavedDraft(null);
+    setSavedRevision(null);
+    setAiSuggestions(null);
+    setRevisionConflict(null);
+    setError('Wallet changed. Your form inputs are preserved; review them before continuing with the current wallet.');
+  }, [address]);
+
+  useEffect(() => {
+    const clearDraftSession = event => {
+      operation.current++;
+      setAiLoading(false);
+      setSavedDraft(null);
+      setSavedRevision(null);
+      setAiSuggestions(null);
+      setRevisionConflict(null);
+      setError(event.detail?.reason === 'logout'
+        ? 'Backend session signed out. Your form inputs are preserved.'
+        : 'Backend session ended. Your form inputs are preserved; check or sign in again before continuing.');
+    };
+    window.addEventListener('revmarket:activity-session-invalidated', clearDraftSession);
+    return () => window.removeEventListener('revmarket:activity-session-invalidated', clearDraftSession);
+  }, []);
 
   const aiSuggestionsStale = aiSuggestions && isAiAssistResultStale(
     aiSuggestions,
@@ -256,6 +289,10 @@ export default function CreateMarketModal({
   };
 
   async function handleAiAssist(overwriteRevisionId) {
+    if (!address) {
+      setError('Connect a Freighter wallet before using AI assistance.');
+      return;
+    }
     if (!question.trim()) {
       setError('Please provide an initial question to analyze with AI.');
       return;
@@ -274,7 +311,14 @@ export default function CreateMarketModal({
       return;
     }
     setAiLoading(true);
+    const generation = ++operation.current;
+    const isCurrentAction = () => generation === operation.current && isWalletCurrent();
     try {
+      const session = await ensureActivitySession(address, {isCurrent: isCurrentAction});
+      if (session.established) {
+        if (isCurrentAction()) setError('Backend wallet session established. Review your draft, then select “Improve with AI” again to continue.');
+        return;
+      }
       const closesAt = Math.floor(Date.now() / 1000) + 86400 * 7;
       const draftData = {
         question: question.trim(),
@@ -295,6 +339,7 @@ export default function CreateMarketModal({
       let next;
       if (!savedDraft) {
         const draft = await createDraft({...draftData, origin: 'manual'}, collateralOptions);
+        if (!isCurrentAction()) throw new Error('Wallet selection changed. Your draft was kept; reconnect and try again.');
         next = {draftId: draft.id, revisionId: draft.revisionId, revisionNumber: 1, contentHash: draft.contentHash};
       } else {
         // Edit the same draft, based on the revision this modal last saved (or, after an explicit
@@ -303,6 +348,7 @@ export default function CreateMarketModal({
           ...collateralOptions,
           expectedRevisionId: overwriteRevisionId ?? savedDraft.revisionId,
         });
+        if (!isCurrentAction()) throw new Error('Wallet selection changed. Your draft was kept; reconnect and try again.');
         next = {draftId: savedDraft.draftId, revisionId: saved.revisionId, revisionNumber: saved.revisionNumber, contentHash: saved.contentHash};
       }
       rememberDraftId(next.draftId);
@@ -321,6 +367,7 @@ export default function CreateMarketModal({
         collateral: pinnedCollateral,
       });
       const res = await requestAiAssist(next.draftId, next.revisionId);
+      if (!isCurrentAction()) throw new Error('Wallet selection changed. Your draft was kept; reconnect and try again.');
       setAiSuggestions({
         ...res,
         expectedDraftId: next.draftId,
@@ -328,6 +375,7 @@ export default function CreateMarketModal({
         sourceForm,
       });
     } catch (err) {
+      if (!isCurrentAction()) return;
       // A stale edit keeps the typed text untouched and waits for an explicit choice; nothing retries automatically.
       if (err.status === 409 && err.body?.code === 'revision_conflict') {
         setRevisionConflict({currentRevisionId: err.body.currentRevisionId, currentRevisionNumber: err.body.currentRevisionNumber});
@@ -335,7 +383,7 @@ export default function CreateMarketModal({
         setError(err.message || 'AI assistance request failed');
       }
     } finally {
-      setAiLoading(false);
+      if (isCurrentAction()) setAiLoading(false);
     }
   }
 
@@ -639,7 +687,7 @@ export default function CreateMarketModal({
           <label>Question
             <div style={{display: 'flex', gap: '8px', marginTop: '4px'}}>
               <input name="question" value={question} onChange={e => {setQuestion(e.target.value); setFieldErrors(previous => ({...previous, question: undefined}));}} required maxLength="512" aria-invalid={Boolean(fieldErrors.question)} aria-describedby={fieldErrors.question ? 'question-error' : undefined} placeholder="Use a precise, verifiable yes/no question" style={{flex: 1}} />
-              <button type="button" className="button button-secondary" disabled={aiLoading || busy || !resolvedCollateral.available} onClick={() => handleAiAssist()} style={{whiteSpace: 'nowrap'}}>
+              <button type="button" className="button button-secondary" disabled={aiLoading || busy || !address || !resolvedCollateral.available} onClick={() => handleAiAssist()} style={{whiteSpace: 'nowrap'}}>
                 {aiLoading ? 'Analyzing…' : 'Improve with AI'}
               </button>
             </div>
@@ -647,7 +695,7 @@ export default function CreateMarketModal({
           </label>
           {revisionConflict && <div className="form-note" role="alert" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
             <p><PhosphorIcon name="info" size={14} /> This draft was changed in another tab or window (now revision {revisionConflict.currentRevisionNumber}). Your text is still here; nothing was overwritten.</p>
-            <button type="button" className="button button-secondary" disabled={aiLoading || busy} onClick={() => handleAiAssist(revisionConflict.currentRevisionId)}>Save my version as a new revision</button>
+            <button type="button" className="button button-secondary" disabled={aiLoading || busy || !address} onClick={() => handleAiAssist(revisionConflict.currentRevisionId)}>Save my version as a new revision</button>
           </div>}
           {aiSuggestions && <div className="form-note" role="status" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
             <p><strong>AI Suggestions · draft revision #{aiSuggestions.sourceRevision.revisionNumber}</strong></p>
@@ -679,7 +727,7 @@ export default function CreateMarketModal({
           <FieldError name="tradingClose" errors={fieldErrors} />
         </label>
         <label>Market artwork <span className="field-optional">{kind === 'event' ? 'Required for event markets' : 'Optional · price markets show the token mark'}</span><input name="imageFile" type="file" accept="image/jpeg,image/png,image/webp" required={kind === 'event'} /></label>
-        <p className="form-note">Artwork uploads are pinned by the backend; an off-chain Freighter sign-in may be requested. Only the image CID is stored on-chain.</p>
+        <p className="form-note">Artwork uploads are pinned by the backend; a signed Freighter session may be requested. Signing in does not submit the form: review it and select Create again to continue. Only the image CID is stored on-chain.</p>
         <label>Resolution details / Description <span className="field-optional">Optional</span>
           <textarea name="description" rows="3" value={draftForm.description || ''} onChange={event => updateDraftField('description', event.target.value)} placeholder="Explain the resolution source, criteria, and evidence rules..." style={{width: '100%', resize: 'vertical'}} />
         </label>

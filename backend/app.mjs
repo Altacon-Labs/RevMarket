@@ -463,12 +463,15 @@ export function createApi(options={}){
       }
       if(route==='GET /api/me'){
         const wallet=session(req);
+        const token=tokenOf(req);
+        const {expiresAt}=db.prepare('SELECT expires_at AS expiresAt FROM sessions WHERE token_hash=?').get(hash(token));
         const profile=db.prepare('SELECT wallet,created_at AS createdAt,last_login AS lastLogin FROM users WHERE wallet=?').get(wallet);
         const activeReviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
         const isSuperAdmin=superAdmins.has(wallet);
         const isActiveReviewer=Boolean(activeReviewer);
         return send(200,{
           ...profile,
+          expiresAt,
           automationEnabled:false,
           isActiveReviewer,
           isSuperAdmin,
