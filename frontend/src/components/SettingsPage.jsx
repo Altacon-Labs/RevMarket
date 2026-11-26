@@ -110,6 +110,30 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
     <div className="page-heading"><div><p className="eyebrow">PREFERENCES & SECURITY</p><h1>Settings</h1></div></div>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">ACCOUNT</p><h2>RevMarket sign-in</h2><p>Privy keeps your app account separate from Stellar transaction approvals.</p></div><span className={`settings-state${authenticated ? ' is-active' : ''}`}>{authenticated ? 'Signed in' : 'Not signed in'}</span></div><div className="settings-detail-row"><span>Email</span><strong>{email || 'No email linked'}</strong></div><div className="settings-detail-row"><span>Authentication</span><strong>{authEnabled ? 'Privy email and web3 wallet' : 'Unavailable'}</strong></div>{authenticated ? <button className="button button-secondary" onClick={() => onLogout?.()}>Sign out</button> : <button className="button button-secondary" disabled={!authEnabled} onClick={() => onLogin?.()}>Sign in</button>}</section>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">STELLAR WALLET</p><h2>Transaction account</h2><p>Freighter signs transactions on Stellar Testnet. Sign in to RevMarket before connecting; Privy login does not authorize spending.</p></div><span className={`settings-state${address ? ' is-active' : ''}`}>{address ? 'Connected' : 'Disconnected'}</span></div><div className="settings-detail-row"><span>Address</span><strong>{address ? shortAddress(address) : 'No Freighter account connected'}</strong></div>{address ? <button className="button button-secondary" disabled={busy} onClick={onDisconnect}>Disconnect Freighter</button> : authenticated && <button className="button button-secondary" disabled={busy} onClick={onConnect}>Connect Freighter</button>}</section>
+    <section className="settings-section">
+      <div className="settings-section-heading">
+        <div>
+          <p className="eyebrow">ACTIVITY PROFILE</p>
+          <h2>Off-chain activity session</h2>
+          <p>{PROFILE_LIFECYCLE_COPY.signatureNotice}</p>
+        </div>
+        <span className={`settings-state${profileState.profile ? ' is-active' : ''}`}>{profileBadge}</span>
+      </div>
+      <div className="settings-detail-row"><span>Backend service</span><strong>{profileState.status === 'checking' ? 'Checking…' : profileState.status === 'online' ? 'Online' : 'Offline'}</strong></div>
+      <div className="settings-detail-row"><span>Profile wallet</span><strong>{profileState.profile ? shortAddress(profileState.profile.wallet) : 'No active off-chain session'}</strong></div>
+      <div className="settings-detail-row"><span>Private reports</span><strong>{profileState.profile ? `${profileState.items.length} reported ${profileState.items.length === 1 ? 'action' : 'actions'}` : 'None'}</strong></div>
+      <p className="form-note">{PROFILE_LIFECYCLE_COPY.deletionScopeSummary}</p>
+      {profileState.message && <p className="form-error" role="alert">{profileState.message}</p>}
+      <div className="activity-actions">
+        {profileState.status === 'offline' && <button className="button button-secondary" type="button" disabled={profileBusy} onClick={refreshProfile}>Retry</button>}
+        {profileState.status === 'online' && address && !profileState.profile && <button className="button button-secondary" type="button" disabled={profileBusy} onClick={enableProfile}>Enable activity profile</button>}
+        {profileState.status === 'online' && profileState.profile && <>
+          <button className="button button-secondary" type="button" disabled={profileBusy} onClick={refreshProfile}>Refresh</button>
+          <button className="button button-quiet button-small" type="button" disabled={profileBusy} onClick={signOutProfile}>Sign out of activity</button>
+          <button className="button button-quiet button-small" type="button" disabled={profileBusy} onClick={deleteProfile}>Delete off-chain profile</button>
+        </>}
+      </div>
+    </section>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">NETWORK</p><h2>Stellar Testnet</h2><p>Market creation and positions use the configured Soroban contract.</p></div><span className="settings-state is-active">Testnet</span></div><div className="settings-detail-row"><span>RPC host</span><strong>{rpcHost}</strong></div><div className="settings-detail-row"><span>Contract</span><strong>{contractId || 'Not configured'}</strong></div><div className="settings-detail-row"><span>Market status</span><strong>{contractId ? 'Reading from contract' : 'Read-only: no contract configured'}</strong></div></section>
     <section className="settings-section">
       <div className="settings-section-heading">
