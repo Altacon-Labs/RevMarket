@@ -1,5 +1,6 @@
 import BackendPanel from '../BackendPanel.jsx';
 import AutomationPanel from '../AutomationPanel.jsx';
+import CreatorReviewStatus from './CreatorReviewStatus.jsx';
 
 export default function ActivityPage(props) {
   return <>
@@ -8,5 +9,6 @@ export default function ActivityPage(props) {
       <BackendPanel {...props} />
       <AutomationPanel />
     </div>
+    <CreatorReviewStatus />
   </>;
 }

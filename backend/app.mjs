@@ -463,7 +463,17 @@ export function createApi(options={}){
       }
       if(route==='GET /api/me'){
         const wallet=session(req);
-        return send(200,{...db.prepare('SELECT wallet,created_at AS createdAt,last_login AS lastLogin FROM users WHERE wallet=?').get(wallet),automationEnabled:false});
+        const profile=db.prepare('SELECT wallet,created_at AS createdAt,last_login AS lastLogin FROM users WHERE wallet=?').get(wallet);
+        const activeReviewer=db.prepare('SELECT wallet FROM reviewers WHERE wallet=? AND revoked_at IS NULL').get(wallet);
+        const isSuperAdmin=superAdmins.has(wallet);
+        const isActiveReviewer=Boolean(activeReviewer);
+        return send(200,{
+          ...profile,
+          automationEnabled:false,
+          isActiveReviewer,
+          isSuperAdmin,
+          canReviewQueue:isActiveReviewer||isSuperAdmin,
+        });
       }
       if(route==='GET /api/admin/network'){
         const wallet=session(req);

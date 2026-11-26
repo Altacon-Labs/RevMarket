@@ -666,6 +666,11 @@ export async function listDrafts({signal} = {}) {
   return result.drafts;
 }
 
+/** Alias used by the reviewer queue; same payload as listDrafts. */
+export async function getOwnedDrafts({signal} = {}) {
+  return listDrafts({signal});
+}
+
 export async function submitDraft(draftId) {
   return await api(`/drafts/${draftId}/submit`, {method: 'POST', body: {}});
 }
@@ -674,8 +679,18 @@ export async function withdrawDraft(draftId) {
   return await api(`/drafts/${draftId}/withdraw`, {method: 'POST', body: {}});
 }
 
-export async function submitReview(draftId, {decision, reason, expectedRevisionId}) {
-  return await api(`/drafts/${draftId}/review`, {method: 'POST', body: {decision, reason, expectedRevisionId}});
+export async function getReviewQueue({signal} = {}) {
+  const result = await api('/review-queue', {signal});
+  if (!result || !Array.isArray(result.queue)) {
+    throw new Error('Review queue returned an invalid response.');
+  }
+  return result.queue;
+}
+
+export async function submitReview(draftId, {decision, reason, expiry, expectedRevisionId}) {
+  const body = {decision, reason, expectedRevisionId};
+  if (expiry !== undefined) body.expiry = expiry;
+  return await api(`/drafts/${draftId}/review`, {method: 'POST', body});
 }
 
 // expectedRevisionId is the revision this edit is based on; a stale id is rejected with 409 revision_conflict.

@@ -1,12 +1,21 @@
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 
-const groups = [
-  {label: 'Markets', items: [{id: 'markets', label: 'All markets', icon: 'grid', count: 'markets'}, {id: 'price', label: 'Price markets', icon: 'chart', count: 'price'}, {id: 'event', label: 'Event markets', icon: 'globe', count: 'event'}]},
-  {label: 'Workspace', items: [{id: 'positions', label: 'My positions', icon: 'wallet', count: 'positions'}, {id: 'activity', label: 'Activity', icon: 'pulse'}, {id: 'settings', label: 'Settings', icon: 'gear'}]},
-];
+function navigationGroups(canReviewQueue) {
+  const workspace = [
+    {id: 'positions', label: 'My positions', icon: 'wallet', count: 'positions'},
+    {id: 'activity', label: 'Activity', icon: 'pulse'},
+  ];
+  if (canReviewQueue) workspace.push({id: 'reviewQueue', label: 'Review queue', icon: 'list'});
+  workspace.push({id: 'settings', label: 'Settings', icon: 'gear'});
+  return [
+    {label: 'Markets', items: [{id: 'markets', label: 'All markets', icon: 'grid', count: 'markets'}, {id: 'price', label: 'Price markets', icon: 'chart', count: 'price'}, {id: 'event', label: 'Event markets', icon: 'globe', count: 'event'}]},
+    {label: 'Workspace', items: workspace},
+  ];
+}
 
-export default function Sidebar({activePage, counts, collapsed, address, onNavigate}) {
+export default function Sidebar({activePage, counts, collapsed, address, onNavigate, canReviewQueue = false}) {
   const accountLabel = address ? `${address.slice(0, 5)}…${address.slice(-5)}` : 'Wallet not connected';
+  const groups = navigationGroups(canReviewQueue);
 
   return <aside className={`sidebar${collapsed ? ' is-collapsed' : ''}`} aria-label="Primary navigation">
     <nav className="sidebar-nav">
