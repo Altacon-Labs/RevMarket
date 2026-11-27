@@ -1,6 +1,6 @@
 import {useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {Link} from 'react-router-dom';
-import {ensureActivitySession, formatShortAddress, validateReviewerWallet} from '../lib/backend.mjs';
+import {ensureActivitySession, formatShortAddress, getPublicStatus, validateReviewerWallet} from '../lib/backend.mjs';
 import {
   REVOCATION_EFFECTS,
   createAdminSettingsController,
@@ -22,6 +22,11 @@ function sessionError(error) {
   return {status: 'error', message: error.message || 'Backend session check failed.'};
 }
 
+function formatCheckedAt(unixSeconds) {
+  if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) return null;
+  return new Date(unixSeconds * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+}
+
 export default function SettingsPage({address, busy, authenticated, authEnabled, user, contractId, rpcUrl, onLogin, onLogout, onConnect, onDisconnect}) {
   const controllerRef = useRef(null);
   if (!controllerRef.current) {
@@ -32,11 +37,34 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
   const [inputError, setInputError] = useState('');
   const [sessionState, setSessionState] = useState({status: 'unchecked', message: ''});
   const [sessionBusy, setSessionBusy] = useState(false);
+
+  // Observed network/service status (loaded once on mount, refreshed on demand)
+  const [serviceStatus, setServiceStatus] = useState({state: 'unchecked', checkedAt: null, apiReady: null, error: null});
+  const [serviceChecking, setServiceChecking] = useState(false);
+
   const operation = useRef(0);
   const activeAddress = useRef(address);
   activeAddress.current = address;
   const email = user?.email?.address;
   const rpcHost = (() => {try {return new URL(rpcUrl).host;} catch {return 'Configured RPC';}})();
+
+  // Derive contract display state from observed data only
+  const contractConfigured = Boolean(contractId);
+  // Contract is only shown as "reading" if the API is healthy AND contractId is set
+  const contractStatus = !contractConfigured
+    ? 'Read-only: no contract configured'
+    : serviceStatus.state === 'ok' && serviceStatus.apiReady
+      ? 'Contract configured — API healthy'
+      : serviceStatus.state === 'error' || serviceStatus.apiReady === false
+        ? 'Contract configured — API unavailable'
+        : 'Contract configured — not yet checked';
+
+  // Network policy: use admin-verified result when authorized, else fall back to public status
+  const networkPolicy = isAdminAuthorizedForWallet(adminState, address)
+    ? adminState.access
+    : serviceStatus.networkPolicy || null;
+
+  const mainnetReason = networkPolicy?.networks?.mainnet?.reason || 'Mainnet is not deployed or supported by this application.';
 
   useLayoutEffect(() => {
     operation.current++;
@@ -78,6 +106,50 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
     if (address) controller.restoreSession();
     return () => controller.abortInFlight();
   }, [address]);
+
+  // Load public service status once on mount — no signing, no paid chart probe
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    async function loadStatus() {
+      try {
+        const result = await getPublicStatus({signal: controller.signal});
+        if (cancelled) return;
+        setServiceStatus({
+          state: 'ok',
+          checkedAt: result.api?.checkedAt ?? null,
+          apiReady: result.api?.ready ?? null,
+          networkPolicy: result.networkPolicy ?? null,
+          error: null,
+        });
+      } catch (err) {
+        if (cancelled || err.name === 'AbortError') return;
+        setServiceStatus({state: 'error', checkedAt: null, apiReady: false, networkPolicy: null, error: err.message || 'Status check failed.'});
+      }
+    }
+    loadStatus();
+    return () => {cancelled = true; controller.abort();};
+  }, []);
+
+  async function retryServiceStatus() {
+    if (serviceChecking) return;
+    setServiceChecking(true);
+    setServiceStatus({state: 'checking', checkedAt: null, apiReady: null, networkPolicy: null, error: null});
+    try {
+      const result = await getPublicStatus();
+      setServiceStatus({
+        state: 'ok',
+        checkedAt: result.api?.checkedAt ?? null,
+        apiReady: result.api?.ready ?? null,
+        networkPolicy: result.networkPolicy ?? null,
+        error: null,
+      });
+    } catch (err) {
+      setServiceStatus({state: 'error', checkedAt: null, apiReady: false, networkPolicy: null, error: err.message || 'Status check failed.'});
+    } finally {
+      setServiceChecking(false);
+    }
+  }
 
   function isCurrent(wallet, version) {
     return activeAddress.current === wallet && operation.current === version;
@@ -170,6 +242,20 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
     unavailable: 'Service unavailable',
     error: 'Check failed',
   };
+
+  // Service status badge label
+  const serviceStatusLabel = serviceStatus.state === 'ok' && serviceStatus.apiReady
+    ? 'API ready'
+    : serviceStatus.state === 'ok' && serviceStatus.apiReady === false
+      ? 'API not ready'
+      : serviceStatus.state === 'error'
+        ? 'Unavailable'
+        : serviceStatus.state === 'checking'
+          ? 'Checking…'
+          : 'Not checked';
+  const serviceStatusActive = serviceStatus.state === 'ok' && serviceStatus.apiReady === true;
+  const checkedAtLabel = formatCheckedAt(serviceStatus.checkedAt);
+
   return <div className="settings-page">
     <div className="page-heading"><div><p className="eyebrow">PREFERENCES & SECURITY</p><h1>Settings</h1></div></div>
     <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">ACCOUNT</p><h2>RevMarket sign-in</h2><p>Privy keeps your app account separate from Stellar transaction approvals.</p></div><span className={`settings-state${authenticated ? ' is-active' : ''}`}>{authenticated ? 'Signed in' : 'Not signed in'}</span></div><div className="settings-detail-row"><span>Email</span><strong>{email || 'No email linked'}</strong></div><div className="settings-detail-row"><span>Authentication</span><strong>{authEnabled ? 'Privy email and web3 wallet' : 'Unavailable'}</strong></div>{authenticated ? <button className="button button-secondary" onClick={() => onLogout?.()}>Sign out</button> : <button className="button button-secondary" disabled={!authEnabled} onClick={() => onLogin?.()}>Sign in</button>}</section>
@@ -187,7 +273,52 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
       <button className="button button-secondary" disabled={!address || sessionBusy} onClick={checkBackendSession}>{sessionBusy ? 'Checking session…' : sessionState.status === 'signed-in' ? 'Check backend session' : 'Check or sign in'}</button>
       {sessionState.message && <p className={sessionState.status === 'error' || sessionState.status === 'unavailable' ? 'form-error' : 'form-note'} role={sessionState.status === 'error' || sessionState.status === 'unavailable' ? 'alert' : 'status'}>{sessionState.message}</p>}
     </section>
-    <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">NETWORK</p><h2>Stellar Testnet</h2><p>Market creation and positions use the configured Soroban contract.</p></div><span className="settings-state is-active">Testnet</span></div><div className="settings-detail-row"><span>RPC host</span><strong>{rpcHost}</strong></div><div className="settings-detail-row"><span>Contract</span><strong>{contractId || 'Not configured'}</strong></div><div className="settings-detail-row"><span>Market status</span><strong>{contractId ? 'Reading from contract' : 'Read-only: no contract configured'}</strong></div></section>
+
+    <section className="settings-section">
+      <div className="settings-section-heading">
+        <div>
+          <p className="eyebrow">NETWORK</p>
+          <h2>Stellar Testnet</h2>
+          <p>Market creation and positions use the configured Soroban contract. Status is observed from the last API probe, not inferred from configuration.</p>
+        </div>
+        <span className={`settings-state${serviceStatusActive ? ' is-active' : ''}`}>{serviceStatusLabel}</span>
+      </div>
+      <div className="settings-detail-row"><span>Configured network</span><strong>Testnet</strong></div>
+      <div className="settings-detail-row"><span>Mainnet</span><strong>Unavailable — {mainnetReason}</strong></div>
+      <div className="settings-detail-row"><span>RPC endpoint</span><strong>{rpcHost} <em className="settings-label-note">(configured)</em></strong></div>
+      <div className="settings-detail-row"><span>Contract ID</span><strong>{contractId || 'Not configured'} <em className="settings-label-note">(configured)</em></strong></div>
+      <div className="settings-detail-row">
+        <span>API service</span>
+        <strong>
+          {serviceStatus.state === 'unchecked' && 'Not yet checked'}
+          {serviceStatus.state === 'checking' && 'Checking…'}
+          {serviceStatus.state === 'ok' && serviceStatus.apiReady === true && 'Ready'}
+          {serviceStatus.state === 'ok' && serviceStatus.apiReady === false && 'Not ready'}
+          {serviceStatus.state === 'error' && 'Unavailable'}
+          {checkedAtLabel && <span className="settings-label-note"> — last checked {checkedAtLabel}</span>}
+        </strong>
+      </div>
+      <div className="settings-detail-row">
+        <span>Contract read status</span>
+        <strong>{contractStatus}</strong>
+      </div>
+      <div className="settings-detail-row">
+        <span>Chart provider</span>
+        <strong>Coinbase <em className="settings-label-note">(configured — not probed on open)</em></strong>
+      </div>
+      {serviceStatus.state === 'error' && (
+        <p className="form-error" role="alert">{serviceStatus.error}</p>
+      )}
+      <button
+        type="button"
+        className="button button-secondary"
+        disabled={serviceChecking}
+        onClick={retryServiceStatus}
+      >
+        {serviceChecking ? 'Checking…' : 'Retry status check'}
+      </button>
+    </section>
+
     <section className="settings-section">
       <div className="settings-section-heading">
         <div>
@@ -400,7 +531,7 @@ export default function SettingsPage({address, busy, authenticated, authEnabled,
         </>
       )}
     </section>
-    <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">MARKET DATA</p><h2>Price charts</h2><p>Price-market detail charts use 5-minute, hourly, or 6-hour USD candles fetched directly from Coinbase. Event markets show live on-chain pool shares instead of simulated history.</p></div><span className="settings-state is-active">Live source</span></div><div className="settings-detail-row"><span>Supported assets</span><strong>BTC · ETH · XLM</strong></div><div className="settings-detail-row"><span>Refresh interval</span><strong>60 seconds</strong></div></section>
+    <section className="settings-section"><div className="settings-section-heading"><div><p className="eyebrow">MARKET DATA</p><h2>Price charts</h2><p>Price-market detail charts use 5-minute, hourly, or 6-hour USD candles fetched directly from Coinbase. Event markets show live on-chain pool shares instead of simulated history.</p></div><span className="settings-state">Coinbase <em className="settings-label-note">(configured)</em></span></div><div className="settings-detail-row"><span>Chart provider</span><strong>Coinbase Advanced Trade API <em className="settings-label-note">(configured — not observed)</em></strong></div><div className="settings-detail-row"><span>Supported assets</span><strong>BTC · ETH · XLM</strong></div><div className="settings-detail-row"><span>Refresh interval</span><strong>60 seconds</strong></div></section>
     <section className="settings-section settings-links"><div className="settings-section-heading"><div><p className="eyebrow">POLICIES</p><h2>Account and protocol information</h2></div></div><Link to="/privacy">Privacy policy <PhosphorIcon name="arrowRight" size={14} /></Link><Link to="/risk">Risk disclosure <PhosphorIcon name="arrowRight" size={14} /></Link><Link to="/terms">Terms of use <PhosphorIcon name="arrowRight" size={14} /></Link></section>
   </div>;
 }
