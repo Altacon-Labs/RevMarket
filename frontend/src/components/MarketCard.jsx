@@ -97,10 +97,10 @@ export default function MarketCard({market, position, now, previewMode, variant 
               {(() => {
                 if (totalVolume === 0n) return '—';
                 const pct = Number((BigInt(market.yes_pool || 0) * 100n) / totalVolume);
-                return `${pct}¢`;
+                return `${pct}%`;
               })()}
             </span>
-            <span className="live-price-sublabel">YES PRICE</span>
+            <span className="live-price-sublabel">YES POOL SHARE</span>
           </div>
 
           {activityBuyer && activityTime && (
