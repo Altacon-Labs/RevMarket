@@ -1,6 +1,19 @@
 import {requestAccess, getAddress, getNetworkDetails, signTransaction, isConnected, isAllowed} from '@stellar/freighter-api';
 import {Networks} from '../../../shared/stellar.mjs';
 
+const WALLET_OPT_IN_KEY = 'revmarket.freighter-opt-in';
+
+export function hasWalletOptIn() {
+  try { return localStorage.getItem(WALLET_OPT_IN_KEY) === 'true'; } catch { return false; }
+}
+
+export function setWalletOptIn(enabled) {
+  try {
+    if (enabled) localStorage.setItem(WALLET_OPT_IN_KEY, 'true');
+    else localStorage.removeItem(WALLET_OPT_IN_KEY);
+  } catch {}
+}
+
 function e2eWallet() {
   return import.meta.env?.VITE_E2E_TEST_MODE === 'true' && typeof window !== 'undefined'
     ? window.__REVMARKET_E2E__?.wallet || null
@@ -37,7 +50,9 @@ export async function getExistingAddress() {
       const allowed = await fixture.isAllowed();
       if (!allowed) return null;
       const account = await fixture.getAddress();
-      return account?.address || null;
+      if (!account?.address) return null;
+      const network = await fixture.getNetworkDetails();
+      return !network?.error && network?.networkPassphrase === Networks.TESTNET ? account.address : null;
     }
     const installed = await isConnected();
     if (!installed || installed.error) return null;
@@ -45,6 +60,8 @@ export async function getExistingAddress() {
     if (!allowed || allowed.error || !allowed.isAllowed) return null;
     const account = await getAddress();
     if (account.error || !account.address) return null;
+    const network = await getNetworkDetails();
+    if (network.error || network.networkPassphrase !== Networks.TESTNET) return null;
     return account.address;
   } catch {
     return null;
