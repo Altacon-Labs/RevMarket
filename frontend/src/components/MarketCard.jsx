@@ -4,6 +4,14 @@ import {formatAmount} from '../../../shared/amount.mjs';
 import MarketAvatar from './MarketAvatar.jsx';
 import {marketPath} from '../lib/market-path.mjs';
 
+function relativeTime(nowSeconds, timestamp) {
+  const seconds = Math.max(0, Math.floor(nowSeconds - timestamp));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
 function shortAddress(addr) {
   if (!addr) return 'User';
   if (addr.length <= 10) return addr;
@@ -35,9 +43,16 @@ export default function MarketCard({market, position, now, previewMode, variant 
   // Calculate market volume / liquidity
   const totalVolume = BigInt(market.yes_pool || 0) + BigInt(market.no_pool || 0);
 
-  // Format activity details: buyer address and compact relative time
-  const activityBuyer = market.latest_activity?.user ? shortAddress(market.latest_activity.user) : (market.creator ? shortAddress(market.creator) : 'Trader');
-  const activityTime = market.latest_activity?.timeAgo || '4s ago';
+  // Only render activity supplied by a fixture or a confirmed, attributable chain event.
+  const activity = market.latest_activity;
+  const fixtureActivity = activity?.source === 'fixture' && activity.user && activity.timeAgo;
+  const confirmedActivity = activity?.verification === 'confirmed_chain_event'
+    && activity.user && Number.isFinite(Number(activity.timestamp));
+  const activityBuyer = fixtureActivity || confirmedActivity ? shortAddress(activity.user) : null;
+  const activityTime = fixtureActivity ? activity.timeAgo : confirmedActivity
+    ? relativeTime(Number(now), Number(activity.timestamp))
+    : null;
+  const activitySource = fixtureActivity ? (activity.sourceLabel || 'SAMPLE') : confirmedActivity ? 'ON-CHAIN' : null;
 
   return (
     <article
@@ -80,20 +95,23 @@ export default function MarketCard({market, position, now, previewMode, variant 
           <div className="live-card-price-row">
             <span className="live-price-headline">
               {(() => {
-                if (totalVolume === 0n) return '50¢';
+                if (totalVolume === 0n) return '—';
                 const pct = Number((BigInt(market.yes_pool || 0) * 100n) / totalVolume);
-                return `${pct}¢`;
+                return `${pct}%`;
               })()}
             </span>
-            <span className="live-price-sublabel">YES PRICE</span>
+            <span className="live-price-sublabel">YES POOL SHARE</span>
           </div>
 
-          <div className="live-card-activity-row">
-            <span className="live-pulse-dot" />
-            <span className="live-activity-text">
-              <strong className="live-activity-strong">{activityBuyer}</strong> · {activityTime}
-            </span>
-          </div>
+          {activityBuyer && activityTime && (
+            <div className="live-card-activity-row">
+              <span className="live-pulse-dot" />
+              <span className="live-activity-text">
+                <strong className="live-activity-strong">{activityBuyer}</strong> · {activityTime}
+                <span className="live-activity-source"> {activitySource}</span>
+              </span>
+            </div>
+          )}
         </div>
       )}
 

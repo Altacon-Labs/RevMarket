@@ -94,3 +94,47 @@ test('a refundable market explains that settlement evidence is not expected', as
   assert.match(html, /does not require settlement evidence/);
   assert.doesNotMatch(html, /type="file"/);
 });
+
+
+test('market detail shows seven-decimal pool amounts separately from pool shares and legacy payout', async t => {
+  const server = await createServer({root: frontendRoot, logLevel: 'silent', appType: 'custom', server: {middlewareMode: true}});
+  t.after(() => server.close());
+  const {default: MarketDetailPage} = await server.ssrLoadModule('/src/components/MarketDetailPage.jsx');
+  const market = {
+    id: 1, question: 'Pool display regression fixture', kind: 'Event', asset: null,
+    threshold: 0n, closes_at: 2000n, deadline: 3000n, status: 0,
+    yes_pool: 900_000_000n, no_pool: 100_000_000n, outcome: 0,
+    confidence: 0, evidence: new Uint8Array(32),
+  };
+  const html = renderToStaticMarkup(React.createElement(MemoryRouter,
+    {initialEntries: [{pathname: '/event/pool', hash: '#1'}]},
+    React.createElement(MarketDetailPage, {
+      markets: [market], positions: {}, address: 'GUSER', authenticated: true,
+      now: 1000, previewMode: false,
+    })));
+  assert.match(html, /YES pool/);
+  assert.match(html, /90\.0000000 XLM/);
+  assert.match(html, /90\.00%/);
+  assert.match(html, /NO pool/);
+  assert.match(html, /10\.0000000 XLM/);
+  assert.match(html, /10\.00%/);
+  assert.match(html, /Estimated payout \(legacy settlement\)/);
+  assert.match(html, /11\.0000000 XLM/);
+});
+
+test('empty market detail keeps the empty pool state instead of inventing a 50 percent share', async t => {
+  const server = await createServer({root: frontendRoot, logLevel: 'silent', appType: 'custom', server: {middlewareMode: true}});
+  t.after(() => server.close());
+  const {default: MarketDetailPage} = await server.ssrLoadModule('/src/components/MarketDetailPage.jsx');
+  const market = {
+    id: 1, question: 'Empty pool fixture', kind: 'Event', asset: null,
+    threshold: 0n, closes_at: 2000n, deadline: 3000n, status: 0,
+    yes_pool: 0n, no_pool: 0n, outcome: 0, confidence: 0, evidence: new Uint8Array(32),
+  };
+  const html = renderToStaticMarkup(React.createElement(MemoryRouter,
+    {initialEntries: [{pathname: '/event/empty', hash: '#1'}]},
+    React.createElement(MarketDetailPage, {markets: [market], positions: {}, now: 1000})));
+  assert.match(html, /0\.0000000 XLM/);
+  assert.match(html, />—</);
+  assert.doesNotMatch(html, /50\.00%/);
+});

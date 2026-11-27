@@ -21,6 +21,8 @@ export const MOCK_MARKETS = [
     confidence: 10000,
     evidence: new Uint8Array(32),
     latest_activity: {
+      source: 'fixture',
+      sourceLabel: 'FIXTURE',
       action: 'BUY YES',
       amount: '250 XLM',
       timeAgo: '2m ago',
@@ -45,6 +47,8 @@ export const MOCK_MARKETS = [
     confidence: 9500,
     evidence: new Uint8Array(32),
     latest_activity: {
+      source: 'fixture',
+      sourceLabel: 'FIXTURE',
       action: 'BUY YES',
       amount: '1,200 XLM',
       timeAgo: '4m ago',
@@ -69,6 +73,8 @@ export const MOCK_MARKETS = [
     confidence: 10000,
     evidence: new Uint8Array(32),
     latest_activity: {
+      source: 'fixture',
+      sourceLabel: 'FIXTURE',
       action: 'BUY NO',
       amount: '500 XLM',
       timeAgo: '7m ago',
@@ -93,6 +99,8 @@ export const MOCK_MARKETS = [
     confidence: 10000,
     evidence: new Uint8Array(32),
     latest_activity: {
+      source: 'fixture',
+      sourceLabel: 'FIXTURE',
       action: 'BUY YES',
       amount: '350 XLM',
       timeAgo: '11m ago',
