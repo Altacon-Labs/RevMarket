@@ -1,18 +1,8 @@
 import {requestAccess, getAddress, getNetworkDetails, signTransaction, isConnected, isAllowed} from '@stellar/freighter-api';
 import {Networks} from '../../../shared/stellar.mjs';
 
-const WALLET_OPT_IN_KEY = 'revmarket.freighter-opt-in';
-
-export function hasWalletOptIn() {
-  try { return localStorage.getItem(WALLET_OPT_IN_KEY) === 'true'; } catch { return false; }
-}
-
-export function setWalletOptIn(enabled) {
-  try {
-    if (enabled) localStorage.setItem(WALLET_OPT_IN_KEY, 'true');
-    else localStorage.removeItem(WALLET_OPT_IN_KEY);
-  } catch {}
-}
+import {hasWalletOptIn, setWalletOptIn} from './wallet-preferences.mjs';
+export {hasWalletOptIn, setWalletOptIn} from './wallet-preferences.mjs';
 
 function e2eWallet() {
   return import.meta.env?.VITE_E2E_TEST_MODE === 'true' && typeof window !== 'undefined'
