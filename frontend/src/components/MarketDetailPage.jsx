@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from 'react';
 import {Link, useLocation} from 'react-router-dom';
 import {formatAmount} from '../../../shared/amount.mjs';
+import {estimateLegacyPayout, parseStakeUnits} from '../lib/pool-math.mjs';
 import {loadMarketDetail, parseMarketId, parseMarketSide} from '../lib/market-path.mjs';
 import {fetchPriceCandles} from '../lib/market-data.mjs';
 import MarketAvatar from './MarketAvatar.jsx';
@@ -208,17 +209,17 @@ export default function MarketDetailPage({
   const canClaim = position && !position.claimed && (market.status === 3 || timedOut || (market.status === 2 && position.side === market.outcome));
   const status = timedOut ? 'Refundable' : closed && market.status === 0 ? 'Closed' : ['Open', 'Resolution requested', 'Settled', 'Refundable'][market.status];
   const totalPool = BigInt(market.yes_pool) + BigInt(market.no_pool);
-  const yesShare = totalPool > 0n ? Number(BigInt(market.yes_pool) * 10000n / totalPool) / 100 : 50;
-  const noShare = 100 - yesShare;
+  const yesPool = BigInt(market.yes_pool || 0);
+  const noPool = BigInt(market.no_pool || 0);
+  const yesShare = totalPool > 0n ? Number(yesPool * 10000n / totalPool) / 100 : null;
+  const noShare = totalPool > 0n ? 100 - yesShare : null;
   const canPredict = !previewMode && !closed && market.status === 0 && !position;
   const displayedCandles = priceSeries?.candles.filter(candle => candle.time >= Date.now() - chartRanges[range].seconds * 1000) || [];
 
-  // AMM / Order pricing computations
-  const currentPrice = side === 0 ? Math.max(0.01, yesShare / 100) : Math.max(0.01, noShare / 100);
-  const numericAmount = parseFloat(amount) || 0;
-  const estShares = numericAmount > 0 && currentPrice > 0 ? (numericAmount / currentPrice).toFixed(2) : '0.00';
-  const estPayout = numericAmount > 0 && currentPrice > 0 ? `${(numericAmount / currentPrice).toFixed(2)} XLM` : '0.00 XLM';
-  const estReturnMultiplier = currentPrice > 0 ? (1 / currentPrice).toFixed(2) : '1.00';
+  // Match the contract's proportional settlement formula, including this stake and integer rounding.
+  const stakeUnits = parseStakeUnits(amount);
+  const numericAmount = stakeUnits > 0n ? Number(stakeUnits) / 10_000_000 : 0;
+  const estimatedPayout = estimateLegacyPayout({yesPool, noPool, side, stake: stakeUnits});
 
   const isUserConnected = Boolean(address);
   const isUserSignedIn = Boolean(authenticated);
@@ -283,8 +284,8 @@ export default function MarketDetailPage({
                   <span style={{width: `${yesShare}%`}} />
                 </div>
                 <div className="probability-labels">
-                  <span>YES share <strong>{yesShare.toFixed(2)}%</strong> ({(yesShare / 100).toFixed(2)} XLM)</span>
-                  <span>NO share <strong>{noShare.toFixed(2)}%</strong> ({(noShare / 100).toFixed(2)} XLM)</span>
+                  <span>YES pool <strong>{formatAmount(yesPool)} XLM</strong> · Pool share <strong>{yesShare === null ? '—' : `${yesShare.toFixed(2)}%`}</strong></span>
+                  <span>NO pool <strong>{formatAmount(noPool)} XLM</strong> · Pool share <strong>{noShare === null ? '—' : `${noShare.toFixed(2)}%`}</strong></span>
                 </div>
                 <p className="chart-onchain-note">Computed from the current on-chain YES and NO liquidity pools.</p>
               </>
@@ -309,10 +310,10 @@ export default function MarketDetailPage({
             ) : canPredict && isUserConnected ? (
               <form className="detail-trade-form" onSubmit={event => {event.preventDefault(); onPredict(market.id, side, amount);}}>
                 <div className="trade-outcome yes-outcome">
-                  <span>YES pool share</span><strong>{yesShare.toFixed(2)}%</strong>
+                  <span>YES pool share</span><strong>{yesShare === null ? '—' : `${yesShare.toFixed(2)}%`}</strong>
                 </div>
                 <div className="trade-outcome no-outcome">
-                  <span>NO pool share</span><strong>{noShare.toFixed(2)}%</strong>
+                  <span>NO pool share</span><strong>{noShare === null ? '—' : `${noShare.toFixed(2)}%`}</strong>
                 </div>
                 <div className="segmented-control" role="group" aria-label="Choose an outcome">
                   <button type="button" className={side === 0 ? 'yes-selected' : ''} aria-pressed={side === 0} onClick={() => setSide(0)}>YES</button>
@@ -323,7 +324,7 @@ export default function MarketDetailPage({
                   <input aria-label="Stake amount in XLM" type="number" min="0.1" step="0.1" value={amount} onChange={event => setAmount(event.target.value)} />
                   <span>XLM</span>
                 </label>
-                <p className="position-note">Estimated shares: <strong>{estShares}</strong> · Estimated payout: <strong>{estPayout}</strong></p>
+                <p className="position-note">Estimated payout (legacy settlement): <strong>{estimatedPayout === null ? '—' : `${formatAmount(estimatedPayout)} XLM`}</strong></p>
                 <button type="submit" className="button button-primary market-submit" disabled={busy || numericAmount <= 0}>Confirm position</button>
               </form>
             ) : canPredict && !isUserConnected && isUserSignedIn ? (
