@@ -78,6 +78,24 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     return () => {active = false;};
   }, [address]);
 
+  // Detect extension account/network changes and discard the previous wallet's data.
+  useEffect(() => {
+    if (!address) return undefined;
+    let active = true;
+    const wallet = address;
+    const timer = setInterval(async () => {
+      const current = await getExistingAddress();
+      if (!active || current === wallet) return;
+      setPositions({});
+      setLastAction('');
+      setActivitySession(null);
+      clearActivitySession();
+      setAddress(current || '');
+      if (!current) setMessage('Freighter account or network changed. Reconnect on Stellar Testnet to continue.');
+    }, 8000);
+    return () => { active = false; clearInterval(timer); };
+  }, [address]);
+
   // Restore only wallets for which the user explicitly opted in.
   useEffect(() => {
     let cancelled = false;
