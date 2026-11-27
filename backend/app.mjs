@@ -430,6 +430,21 @@ export function createApi(options={}){
         if(route==='GET /api/health')return send(200,{status:'ok',service:'revmarket-api',version:1,network:'testnet',automationEnabled:false});
         return send(200,{status:'ready',service:'revmarket-api'});
       }
+      if(route==='GET /api/status'){
+        let dbReady=false;
+        try{db.prepare('SELECT 1').get();dbReady=true;}catch{}
+        const adminWallet=peekSessionWallet(req);
+        const isSuperAdmin=adminWallet&&superAdmins.has(adminWallet);
+        const networkPolicy=isSuperAdmin
+          ?{role:'super_admin',activeNetwork:'testnet',networks:{testnet:{available:true},mainnet:{available:false,reason:'Mainnet is not deployed or supported by this application.'}}}
+          :null;
+        return send(200,{
+          api:{ready:dbReady,checkedAt:time},
+          network:'testnet',
+          mainnetAvailable:false,
+          ...(networkPolicy?{networkPolicy}:{}),
+        });
+      }
       if(route==='POST /api/auth/challenge'){
         const body=await bodyOf(req);object(body,['wallet']);
         if(typeof body.wallet!=='string' || !StrKey.isValidEd25519PublicKey(body.wallet))throw new ApiError(400,'Valid Stellar G-address required');

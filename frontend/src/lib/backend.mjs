@@ -832,6 +832,10 @@ export async function getCurrentSession({signal} = {}) {
   return await api('/me', {signal});
 }
 
+export async function getPublicStatus({signal} = {}) {
+  return await api('/status', {signal});
+}
+
 export async function getAdminNetwork({signal} = {}) {
   return await api('/admin/network', {signal});
 }
