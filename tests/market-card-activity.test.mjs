@@ -39,3 +39,17 @@ test('confirmed chain activity uses the attributable actor and event timestamp',
   assert.match(html, /1m ago/);
   assert.match(html, /ON-CHAIN/);
 });
+
+test('live cards label pool ratios as shares rather than executable prices', async t => {
+  const html = await renderCard(t, market());
+  assert.match(html, /YES POOL SHARE/);
+  assert.match(html, /90%/);
+  assert.doesNotMatch(html, /90¢|YES PRICE/);
+});
+
+test('empty live cards do not invent a fifty-cent quote', async t => {
+  const html = await renderCard(t, market({yes_pool: 0n, no_pool: 0n}));
+  assert.match(html, /YES POOL SHARE/);
+  assert.match(html, /—/);
+  assert.doesNotMatch(html, /50¢|50%/);
+});
