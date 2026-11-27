@@ -2,7 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import {Navigate, Route, Routes, useLocation, useNavigate} from 'react-router-dom';
 import {createClient, normalizeMarket, sc} from '../../shared/stellar.mjs';
 import {formatAmount, parseAmount} from '../../shared/amount.mjs';
-import {connect, checkWallet, signer, getExistingAddress} from './lib/wallet.mjs';
+import {connect, checkWallet, signer, getExistingAddress, hasWalletOptIn, setWalletOptIn} from './lib/wallet.mjs';
 import PhosphorIcon from './icons/PhosphorIcon.jsx';
 import {clearActivitySession, getCurrentSession, logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
 import {createdMarketId, describeEscrow, prepareLegacyCreate, withLegacyArtwork} from './lib/legacy-create.mjs';
@@ -67,6 +67,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   currentAddress.current = address;
   const [promptDismissed, setPromptDismissed] = useState(false);
   const autoConnectAttempted = useRef(false);
+  const walletRequest = useRef(0);
   const [activitySession, setActivitySession] = useState(null);
 
   useEffect(() => {
@@ -77,29 +78,40 @@ export default function App({privyEnabled = false, ready = false, authenticated 
     return () => {active = false;};
   }, [address]);
 
-  // Auto-connect Freighter for returning users or upon Privy authentication
+  // Detect extension account/network changes and discard the previous wallet's data.
+  useEffect(() => {
+    if (!address) return undefined;
+    let active = true;
+    const wallet = address;
+    const timer = setInterval(async () => {
+      const current = await getExistingAddress();
+      if (!active || current === wallet) return;
+      setPositions({});
+      setLastAction('');
+      setActivitySession(null);
+      clearActivitySession();
+      setAddress(current || '');
+      if (!current) setMessage('Freighter account or network changed. Reconnect on Stellar Testnet to continue.');
+    }, 8000);
+    return () => { active = false; clearInterval(timer); };
+  }, [address]);
+
+  // Restore only wallets for which the user explicitly opted in.
   useEffect(() => {
     let cancelled = false;
-    async function checkAutoConnect() {
-      if (address) return;
-      try {
-        const existing = await getExistingAddress();
-        if (!cancelled && existing) {
-          setAddress(existing);
-        } else if (authenticated && !autoConnectAttempted.current && !promptDismissed) {
-          autoConnectAttempted.current = true;
-          try {
-            const connected = await connect();
-            if (!cancelled && connected) setAddress(connected);
-          } catch {
-            // User can still connect via topbar button or banner
-          }
-        }
-      } catch {}
+    const request = ++walletRequest.current;
+    async function restoreWallet() {
+      if (address || !hasWalletOptIn()) return;
+      const existing = await getExistingAddress();
+      if (!cancelled && walletRequest.current === request && existing) {
+        setAddress(existing);
+      } else if (!cancelled && walletRequest.current === request && !existing) {
+        setWalletOptIn(false);
+      }
     }
-    checkAutoConnect();
+    restoreWallet().catch(() => {});
     return () => { cancelled = true; };
-  }, [authenticated, address, promptDismissed]);
+  }, [address]);
 
   async function refresh(isInitial = false) {
     if (isInitial) {
@@ -169,14 +181,23 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   }
 
   async function connectWallet() {
+    const request = ++walletRequest.current;
     const wallet = await connect();
+    if (request !== walletRequest.current) return;
+    setWalletOptIn(true);
     setAddress(wallet);
+    setPositions({});
     setMessage('Wallet connected to Stellar Testnet.');
   }
 
   async function disconnectWallet() {
+    ++walletRequest.current;
+    setWalletOptIn(false);
     setAddress('');
     setPositions({});
+    setLastAction('');
+    setActivitySession(null);
+    clearActivitySession();
     await logoutActivity().catch(() => {});
     setMessage('Wallet disconnected.');
   }
