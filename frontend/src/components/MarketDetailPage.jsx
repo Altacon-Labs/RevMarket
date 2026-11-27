@@ -280,8 +280,8 @@ export default function MarketDetailPage({
               )
             ) : (
               <>
-                <div className="probability-bar" role="img" aria-label={`YES pool share ${yesShare} percent, NO pool share ${noShare} percent`}>
-                  <span style={{width: `${yesShare}%`}} />
+                <div className="probability-bar" role="img" aria-label={yesShare === null ? 'Pool shares unavailable for empty pools' : `YES pool share ${yesShare} percent, NO pool share ${noShare} percent`}>
+                  <span style={{width: `${yesShare ?? 0}%`}} />
                 </div>
                 <div className="probability-labels">
                   <span>YES pool <strong>{formatAmount(yesPool)} XLM</strong> · Pool share <strong>{yesShare === null ? '—' : `${yesShare.toFixed(2)}%`}</strong></span>
