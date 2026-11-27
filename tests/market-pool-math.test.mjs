@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {estimateLegacyPayout, parseStakeUnits} from '../frontend/src/lib/pool-math.mjs';
+import {estimateLegacyPayout, parseStakeUnits, poolShares} from '../frontend/src/lib/pool-math.mjs';
 
 test('stake parsing preserves seven-decimal XLM base units', () => {
   assert.equal(parseStakeUnits('90'), 900_000_000n);
@@ -20,4 +20,11 @@ test('empty and one-sided pools have mathematically honest payout estimates', ()
   assert.equal(estimateLegacyPayout({yesPool: 0n, noPool: 0n, side: 0, stake: 10_000_000n}), 10_000_000n);
   assert.equal(estimateLegacyPayout({yesPool: 0n, noPool: 100_000_000n, side: 0, stake: 10_000_000n}), 110_000_000n);
   assert.equal(estimateLegacyPayout({yesPool: 100_000_000n, noPool: 0n, side: 1, stake: 10_000_000n}), 110_000_000n);
+});
+
+test('pool shares are unavailable for empty pools and exact for one-sided pools', () => {
+  assert.equal(poolShares(0n, 0n), null);
+  assert.deepEqual(poolShares(900_000_000n, 100_000_000n), {yes: 90, no: 10});
+  assert.deepEqual(poolShares(100_000_000n, 0n), {yes: 100, no: 0});
+  assert.deepEqual(poolShares(0n, 100_000_000n), {yes: 0, no: 100});
 });
