@@ -18,3 +18,12 @@ export function estimateLegacyPayout({yesPool, noPool, side, stake}) {
   if (winningPoolAfterStake <= 0n) return null;
   return amount * totalPoolAfterStake / winningPoolAfterStake;
 }
+
+export function poolShares(yesPool, noPool) {
+  const yes = BigInt(yesPool);
+  const no = BigInt(noPool);
+  const total = yes + no;
+  if (total === 0n) return null;
+  const yesPercent = Number(yes * 10_000n / total) / 100;
+  return {yes: yesPercent, no: 100 - yesPercent};
+}
