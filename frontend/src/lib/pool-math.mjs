@@ -2,7 +2,7 @@ const SCALE = 10_000_000n;
 
 export function parseStakeUnits(value) {
   const input = String(value ?? '').trim();
-  if (!input || !/^(?:0|[1-9]\\d*)(?:\\.\\d{1,7})?$/.test(input)) return 0n;
+  if (!input || !/^(?:0|[1-9]\d*)(?:\.\d{1,7})?$/.test(input)) return 0n;
   const [whole, fraction = ''] = input.split('.');
   return BigInt(whole) * SCALE + BigInt(fraction.padEnd(7, '0'));
 }
