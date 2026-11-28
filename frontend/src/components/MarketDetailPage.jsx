@@ -31,6 +31,7 @@ export default function MarketDetailPage({
   onPredict,
   onClaim,
   onRequest,
+  onRefreshMarket,
 }) {
   const location = useLocation();
   const parsedId = parseMarketId(location.hash);
@@ -307,7 +308,10 @@ export default function MarketDetailPage({
                 You hold <strong>{position.side === 0 ? 'YES' : 'NO'}</strong> with {formatAmount(position.amount)} XLM staked.
               </div>
             ) : canPredict && isUserConnected ? (
-              <form className="detail-trade-form" onSubmit={event => {event.preventDefault(); onPredict(market.id, side, amount);}}>
+              <form className="detail-trade-form" onSubmit={event => {
+                event.preventDefault();
+                Promise.resolve(onPredict(market.id, side, amount)).then(() => onRefreshMarket?.(market.id));
+              }}>
                 <div className="trade-outcome yes-outcome">
                   <span>YES pool share</span><strong>{yesShare.toFixed(2)}%</strong>
                 </div>
@@ -341,10 +345,14 @@ export default function MarketDetailPage({
               <p className="preview-note">This market is not accepting new positions.</p>
             )}
             {market.status === 0 && closed && !timedOut && (
-              <button type="button" className="button button-secondary market-submit" disabled={busy} onClick={() => onRequest(market.id)}>Request resolution</button>
+              <button type="button" className="button button-secondary market-submit" disabled={busy} onClick={() => {
+                Promise.resolve(onRequest(market.id)).then(() => onRefreshMarket?.(market.id));
+              }}>Request resolution</button>
             )}
             {canClaim && (
-              <button type="button" className="button button-primary market-submit" disabled={busy} onClick={() => onClaim(market.id)}>
+              <button type="button" className="button button-primary market-submit" disabled={busy} onClick={() => {
+                Promise.resolve(onClaim(market.id)).then(() => onRefreshMarket?.(market.id));
+              }}>
                 Claim {market.status === 2 ? 'payout' : 'refund'}
               </button>
             )}
