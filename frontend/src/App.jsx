@@ -4,7 +4,8 @@ import {createClient, normalizeMarket, sc} from '../../shared/stellar.mjs';
 import {formatAmount, parseAmount} from '../../shared/amount.mjs';
 import {connect, checkWallet, signer, getExistingAddress} from './lib/wallet.mjs';
 import PhosphorIcon from './icons/PhosphorIcon.jsx';
-import {clearActivitySession, getCurrentSession, logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import {api, clearActivitySession, getCurrentSession, logoutActivity, reportActivity, uploadMarketImage} from './lib/backend.mjs';
+import {discoverWalletMarketIds, computeExtraMarketIds, hasOpenAmount, describeCoverage} from './lib/position-discovery.mjs';
 import {createdMarketId, describeEscrow, prepareLegacyCreate, withLegacyArtwork} from './lib/legacy-create.mjs';
 import {MOCK_MARKETS} from './lib/mock-data.mjs';
 import Header from './components/Header.jsx';
@@ -68,6 +69,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   const [promptDismissed, setPromptDismissed] = useState(false);
   const autoConnectAttempted = useRef(false);
   const [activitySession, setActivitySession] = useState(null);
+  const [positionCoverage, setPositionCoverage] = useState({complete: true, hasGaps: false, extraCount: 0});
 
   useEffect(() => {
     let active = true;
@@ -117,15 +119,48 @@ export default function App({privyEnabled = false, ready = false, authenticated 
         setMarkets(MOCK_MARKETS);
         return;
       }
+
+      // --- Window: most-recent 50 markets (home page) ---
+      const windowStart = Math.max(0, count - 50);
       const nextMarkets = [];
       const nextPositions = {};
-      for (let id = Math.max(0, count - 50); id < count; id++) {
+      for (let id = windowStart; id < count; id++) {
         nextMarkets.push({id, ...normalizeMarket(await client.read(source, 'get_market', [sc.u32(id)]))});
         if (address) nextPositions[id] = await client.read(source, 'get_position', [sc.u32(id), sc.address(address)]);
       }
       if (currentSource.current !== source) return;
-      setMarkets(nextMarkets.reverse());
+
+      // --- Extended wallet scan: positions beyond the 50-market window ---
+      let extraCount = 0;
+      let coverageComplete = true;
+      let coverageHasGaps = false;
+      if (address && windowStart > 0) {
+        const {marketIds, hasGaps, fresh, unavailable} = await discoverWalletMarketIds(api);
+        if (currentSource.current !== source) return;
+
+        const extraIds = computeExtraMarketIds(marketIds, windowStart);
+        for (const id of extraIds) {
+          if (currentSource.current !== source) return;
+          try {
+            const position = await client.read(source, 'get_position', [sc.u32(id), sc.address(address)]);
+            if (!hasOpenAmount(position)) continue;
+            const market = {id, ...normalizeMarket(await client.read(source, 'get_market', [sc.u32(id)]))};
+            nextMarkets.push(market);
+            nextPositions[id] = position;
+            extraCount++;
+          } catch {
+            // Single market fetch failure must not block the rest
+          }
+        }
+        const coverage = describeCoverage({fresh, hasGaps, unavailable, extraCount});
+        coverageComplete = coverage.complete;
+        coverageHasGaps = coverage.hasGaps;
+      }
+
+      if (currentSource.current !== source) return;
+      setMarkets(nextMarkets.sort((a, b) => b.id - a.id));
       setPositions(nextPositions);
+      setPositionCoverage({complete: coverageComplete, hasGaps: coverageHasGaps, extraCount});
     } catch (err) {
       // In preview mode or RPC offline, serve interactive mock data smoothly
       setMarkets(MOCK_MARKETS);
@@ -177,6 +212,7 @@ export default function App({privyEnabled = false, ready = false, authenticated 
   async function disconnectWallet() {
     setAddress('');
     setPositions({});
+    setPositionCoverage({complete: true, hasGaps: false, extraCount: 0});
     await logoutActivity().catch(() => {});
     setMessage('Wallet disconnected.');
   }
@@ -330,8 +366,8 @@ export default function App({privyEnabled = false, ready = false, authenticated 
           <Route path="/markets/price" element={<><div className="page-heading"><div><p className="eyebrow">PRICE MARKETS</p><h1>Price markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Price')} /></>} />
           <Route path="/markets/event" element={<><div className="page-heading"><div><p className="eyebrow">EVENT MARKETS</p><h1>Event markets</h1></div></div><MarketGrid {...marketProps} markets={matchingMarkets.filter(market => market.kind === 'Event')} /></>} />
           <Route path="/event/:slug" element={<MarketDetailPage markets={markets} positions={positions} address={address} source={source} client={client} contractId={env.VITE_CONTRACT_ID} loading={loading} authenticated={authenticated} onConnect={() => runAction(connectWallet)} onLogin={onLogin} busy={busy} now={now} previewMode={previewMode} onPredict={predict} onClaim={claimPosition} onRequest={requestResolution} />} />
-          <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} positions loaded from the contract</p></div></div><PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
-          <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={logoutApp} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} />} />
+          <Route path="/positions" element={<><div className="page-heading"><div><p className="eyebrow">YOUR ACCOUNT</p><h1>Open positions</h1></div><button className="button button-quiet" disabled={busy || !client} onClick={() => runAction(refresh)}>Refresh</button></div><StatsBar stats={stats} /><section className="workspace-panel"><div className="panel-heading"><div><h2>Positions</h2><p>{positionRows.length} position{positionRows.length !== 1 ? 's' : ''} loaded from the contract{positionCoverage.extraCount > 0 ? ` (${positionCoverage.extraCount} from earlier markets)` : ''}</p></div></div>{!positionCoverage.complete && address && <p className="status-message" role="status" aria-live="polite">{positionCoverage.hasGaps ? 'Position history may be incomplete — the activity indexer has gaps. Some older positions could be missing.' : 'Scanning older markets for your positions; coverage may be partial.'}</p>}<PositionTable rows={visiblePositionRows} busy={busy} onClaim={claimPosition} onRequest={requestResolution} /></section></>} />
+          <Route path="/profile" element={<ProfilePage address={address} busy={busy} authEnabled={privyEnabled && ready} authenticated={authenticated} user={user} onLogin={onLogin} onLogout={logoutApp} onConnect={() => runAction(connectWallet)} onDisconnect={() => runAction(disconnectWallet)} onClaim={claimPosition} onRequest={requestResolution} stats={stats} positionRows={visiblePositionRows} positionCoverage={positionCoverage} />} />
           <Route path="/activity" element={<ActivityPage address={address} lastAction={lastAction} authenticated={authenticated} authEnabled={privyEnabled && ready} onLogin={onLogin} onConnect={() => runAction(connectWallet)} />} />
           <Route path="/drafts/:draftId/publish" element={<PublicationIntentPage now={now} />} />
           <Route path="/drafts/:draftId/revisions/:revisionId/publish" element={<PublicationIntentPage now={now} />} />
